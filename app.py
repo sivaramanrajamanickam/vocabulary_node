@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import re
-import sys
 import time
 import unicodedata
 import warnings
@@ -23,7 +22,8 @@ HSK_LEVEL_RE = re.compile(
     re.I,
 )
 HSK_ENTRY_RE = re.compile(
-    r"^(?P<number>\d+)\s+(?P<word>\S+)\s+(?P<pinyin>\S+)(?:\s+(?P<rest>.*))?$"
+    r"^(?P<number>\d+)\s+(?P<word>\S+)\s+(?P<pinyin>\S+)"
+    r"(?:\s+(?P<rest>.*))?$"
 )
 
 HSK_EXPECTED = {
@@ -110,9 +110,11 @@ def parse_oxford_cell(cell_text: str, level: str) -> dict[str, Any] | None:
         word = clean(text[:match.start()])
         if not looks_like_oxford_word(word):
             return None
-        return {"id": "", "lang": "en", "word": word.lower(), "pinyin": "",
-                "pos": normalize_oxford_pos(text[match.start():]), "definition": "",
-                "level": level, "source": ""}
+        return {
+            "id": "", "lang": "en", "word": word.lower(), "pinyin": "",
+            "pos": normalize_oxford_pos(text[match.start():]),
+            "definition": "", "level": level, "source": "",
+        }
     if text.lower() in {"level", "by cefr", "words to learn in english", "from a1 to b2 level."}:
         return None
     definition = ""
@@ -123,8 +125,10 @@ def parse_oxford_cell(cell_text: str, level: str) -> dict[str, Any] | None:
         definition = clean(parenthetical.group("definition"))
     if not looks_like_oxford_word(word):
         return None
-    return {"id": "", "lang": "en", "word": word.lower(), "pinyin": "", "pos": "",
-            "definition": definition, "level": level, "source": ""}
+    return {
+        "id": "", "lang": "en", "word": word.lower(), "pinyin": "", "pos": "",
+        "definition": definition, "level": level, "source": "",
+    }
 
 
 def get_page_columns(page) -> list[list[dict[str, Any]]]:
@@ -162,16 +166,26 @@ def column_lines(words) -> list[str]:
                 target = line
                 break
         item = {**word, "_top": top}
-        (target if target is not None else lines.setdefault(len(lines), [])).append(item)
-    return [clean(" ".join(w["text"] for w in sorted(line, key=lambda x: float(x["x0"]))))
-            for line in lines if line]
+        if target is None:
+            lines.append([item])
+        else:
+            target.append(item)
+    return [
+        clean(" ".join(w["text"] for w in sorted(line, key=lambda x: float(x["x0"]))))
+        for line in lines
+        if line
+    ]
 
 
 def parse_english(path: Path) -> list[dict[str, Any]]:
     results, current_level = [], ""
     with open_pdf(path) as pdf:
         for page_number, page in enumerate(pdf.pages, 1):
-            headings = re.findall(r"\b(?:A1|A2|B1|B2|C1)\b", clean(page.extract_text() or ""), re.I)
+            headings = re.findall(
+                r"\b(?:A1|A2|B1|B2|C1)\b",
+                clean(page.extract_text() or ""),
+                re.I,
+            )
             if headings:
                 current_level = headings[-1].upper()
             for column in get_page_columns(page):
@@ -211,21 +225,30 @@ def parse_hsk_entry_line(line: str, level: str):
     rest = clean(match.group("rest"))
     pos, definition = "", rest
     pos_pattern = re.compile(
-        r"^(?P<pos>(?:能愿|名|动|形|副|代|介|连|助|量|数)(?:\s*[、,]\s*(?:能愿|名|动|形|副|代|介|连|助|量|数))*|(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|particle|classifier|number)(?:\s*[,、]\s*(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|particle|classifier|number))*)\s*",
+        r"^(?P<pos>(?:能愿|名|动|形|副|代|介|连|助|量|数)"
+        r"(?:\s*[、,]\s*(?:能愿|名|动|形|副|代|介|连|助|量|数))*"
+        r"|(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|particle|classifier|number)"
+        r"(?:\s*[,、]\s*(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|particle|classifier|number))*)\s*",
         re.I,
     )
     pos_match = pos_pattern.match(rest)
     if pos_match:
         pos = normalize_zh_pos(pos_match.group("pos")) or clean(pos_match.group("pos"))
         definition = clean(rest[pos_match.end():])
-    return {"id": "", "lang": "zh", "word": word, "pinyin": clean(match.group("pinyin")),
-            "pos": pos, "definition": definition, "level": level, "source": "",
-            "_number": int(match.group("number"))}
+    return {
+        "id": "", "lang": "zh", "word": word,
+        "pinyin": clean(match.group("pinyin")), "pos": pos,
+        "definition": definition, "level": level, "source": "",
+        "_number": int(match.group("number")),
+    }
 
 
 def detect_hsk_level(text: str) -> str | None:
     match = HSK_LEVEL_RE.search(normalize_unicode(text))
-    return f"HSK {re.sub(r'\s+', '', match.group(1))}" if match else None
+    if not match:
+        return None
+    level_text = re.sub(r"\s+", "", match.group(1))
+    return f"HSK {level_text}"
 
 
 def parse_hsk(path: Path, diagnostic: bool = False) -> list[dict[str, Any]]:
@@ -250,8 +273,12 @@ def parse_hsk(path: Path, diagnostic: bool = False) -> list[dict[str, Any]]:
                 if current_level is None:
                     continue
                 upper = line.upper()
-                if ("NO. WORD PINYIN" in upper or upper == "ENTRIES" or
-                        "MANDARINBEAN.COM PAGE" in upper or line.startswith(("⇨", ">>>"))):
+                if (
+                    "NO. WORD PINYIN" in upper
+                    or upper == "ENTRIES"
+                    or "MANDARINBEAN.COM PAGE" in upper
+                    or line.startswith(("⇨", ">>>"))
+                ):
                     continue
                 parsed = parse_hsk_entry_line(line, current_level)
                 if parsed:
@@ -375,7 +402,7 @@ def prepare_embedding_rows(rows):
     return texts
 
 
-def make_graph(rows, threshold=0.78, batch_size=32, mutual_only=True, min_group_similarity=0.80):
+def make_graph(rows, threshold=0.78, batch_size=32, mutual_only=True):
     from sentence_transformers import SentenceTransformer
     from sklearn.neighbors import NearestNeighbors
 
@@ -386,10 +413,21 @@ def make_graph(rows, threshold=0.78, batch_size=32, mutual_only=True, min_group_
     log("Loading multilingual embedding model...")
     model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
     log(f"Encoding {len(texts):,} vocabulary entries...")
-    vectors = model.encode(texts, normalize_embeddings=True, show_progress_bar=True, batch_size=batch_size)
+    vectors = model.encode(
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=True,
+        batch_size=batch_size,
+    )
 
     if len(rows) == 1:
-        return {"concept_00001": {"id": "concept_00001", "definition": rows[0]["definition"], "members": [rows[0]]}}, {}, []
+        return {
+            "concept_00001": {
+                "id": "concept_00001",
+                "definition": rows[0]["definition"],
+                "members": [rows[0]],
+            }
+        }, {}, []
 
     k = min(30, len(rows))
     nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=-1).fit(vectors)
@@ -423,15 +461,20 @@ def make_graph(rows, threshold=0.78, batch_size=32, mutual_only=True, min_group_
             score = 1.0 - float(distance)
             mutual = i in neighbour_sets[j]
             cross_language = rows[i]["lang"] != rows[j]["lang"]
-            compatible_pos = not (rows[i].get("pos") and rows[j].get("pos") and rows[i]["pos"] != rows[j]["pos"])
+            pos_i = rows[i].get("pos", "")
+            pos_j = rows[j].get("pos", "")
+            compatible_pos = not (pos_i and pos_j and pos_i != pos_j)
 
             if score >= threshold and (not mutual_only or mutual) and compatible_pos:
                 union(i, j)
             elif cross_language and score >= threshold - 0.06:
                 review.append({
-                    "entry_a": rows[i]["id"], "word_a": rows[i]["word"],
-                    "entry_b": rows[j]["id"], "word_b": rows[j]["word"],
-                    "similarity": round(score, 4), "mutual": mutual,
+                    "entry_a": rows[i]["id"],
+                    "word_a": rows[i]["word"],
+                    "entry_b": rows[j]["id"],
+                    "word_b": rows[j]["word"],
+                    "similarity": round(score, 4),
+                    "mutual": mutual,
                     "compatible_pos": compatible_pos,
                 })
         if (i + 1) % 1000 == 0 or i + 1 == len(rows):
@@ -448,25 +491,41 @@ def make_graph(rows, threshold=0.78, batch_size=32, mutual_only=True, min_group_
         label = max(members, key=lambda item: len(item.get("definition", "")))
         clean_members = []
         for member in members:
-            clean_member = {key: member.get(key, "") for key in [
-                "id", "lang", "word", "pinyin", "pos", "definition", "level", "radicals"
-            ]}
+            clean_member = {
+                key: member.get(key, "")
+                for key in [
+                    "id", "lang", "word", "pinyin", "pos",
+                    "definition", "level", "radicals",
+                ]
+            }
             clean_members.append(clean_member)
             for radical in member.get("radicals", []):
                 radical_index[radical].add(concept_id)
-        concepts[concept_id] = {"id": concept_id, "definition": label["definition"], "members": clean_members}
+        concepts[concept_id] = {
+            "id": concept_id,
+            "definition": label["definition"],
+            "members": clean_members,
+        }
 
     return concepts, {key: sorted(value) for key, value in radical_index.items()}, review
 
 
 def resolve_pdf(requested: str, label: str) -> Path:
     path = Path(requested).expanduser()
-    candidates = [path] if path.is_absolute() else [Path.cwd() / path, Path(__file__).resolve().parent / path,
-        Path.home() / "Downloads" / path.name, Path.home() / "Desktop" / path.name, Path.home() / "Documents" / path.name]
+    candidates = [path] if path.is_absolute() else [
+        Path.cwd() / path,
+        Path(__file__).resolve().parent / path,
+        Path.home() / "Downloads" / path.name,
+        Path.home() / "Desktop" / path.name,
+        Path.home() / "Documents" / path.name,
+    ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
-    raise FileNotFoundError(f"{label} PDF not found: {requested}\nChecked:\n" + "\n".join(map(str, candidates)))
+    raise FileNotFoundError(
+        f"{label} PDF not found: {requested}\nChecked:\n"
+        + "\n".join(map(str, candidates))
+    )
 
 
 def main():
@@ -491,13 +550,13 @@ def main():
 
     log("\n[1/5] Parsing Oxford 5000...")
     english = parse_english(english_path)
-    validate_english(english)
     log(f"Extracted: {len(english):,}")
+    validate_english(english)
 
     log("\n[2/5] Parsing HSK 1–9...")
     chinese = parse_hsk(hsk_path, diagnostic=args.diagnostic)
-    validate_hsk(chinese, strict=args.strict_hsk)
     log(f"Extracted: {len(chinese):,}")
+    validate_hsk(chinese, strict=args.strict_hsk)
 
     log("\n[3/5] Adding English WordNet definitions...")
     rows = add_wordnet_definitions(english + chinese)
@@ -512,10 +571,18 @@ def main():
     )
 
     log("\n[5/5] Writing output...")
-    pd.DataFrame(rows).drop(columns=["embedding_text"], errors="ignore").to_csv(output / "entries.csv", index=False, encoding="utf-8-sig")
-    (output / "concepts.json").write_text(json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "radicals.json").write_text(json.dumps(radical_index, ensure_ascii=False, indent=2), encoding="utf-8")
-    pd.DataFrame(review).drop_duplicates().to_csv(output / "review.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(rows).drop(columns=["embedding_text"], errors="ignore").to_csv(
+        output / "entries.csv", index=False, encoding="utf-8-sig"
+    )
+    (output / "concepts.json").write_text(
+        json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (output / "radicals.json").write_text(
+        json.dumps(radical_index, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    pd.DataFrame(review).drop_duplicates().to_csv(
+        output / "review.csv", index=False, encoding="utf-8-sig"
+    )
     log(f"SUCCESS | concepts={len(concepts):,} | output={output}")
 
 
