@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import argparse
@@ -5,57 +6,29 @@ import json
 import logging
 import re
 import sys
+import time
 import unicodedata
 import warnings
+from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pdfplumber
 
-
-# ============================================================
-# Vocabulary Node Builder
-# Corrected PDF extraction for:
-#   - Oxford 5000 by CEFR level
-#   - New HSK Vocabulary Levels 1-6 and 7-9
-#
-# IMPORTANT:
-# The Oxford PDF is multi-column. pdfplumber's normal extract_text()
-# flattens columns together, so this version extracts words from the
-# individual PDF words/coordinates instead.
-#
-# The HSK PDF contains some CJK Compatibility / Kangxi characters.
-# NFKC normalization converts them back to normal Chinese characters.
-# ============================================================
-
-
 HANZI_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 OXFORD_LEVEL_RE = re.compile(r"^(A1|A2|B1|B2|C1)$", re.I)
-
-OXFORD_POS_RE = re.compile(
-    r"^(?P<pos>"
-    r"(?:n\.|v\.|adj\.|adv\.|pron\.|prep\.|conj\.|det\.|"
-    r"exclam\.|modal v\.|auxiliary|article|number|infinitive)"
-    r"(?:\s*,\s*(?:n\.|v\.|adj\.|adv\.|pron\.|prep\.|conj\.|det\.|"
-    r"exclam\.|modal v\.|auxiliary|article|number|infinitive))*"
-    r")",
+HSK_LEVEL_RE = re.compile(
+    r"(?:NEW\s+HSK\s+VOCABULARY\s*)?"
+    r"LEVEL\s*([1-9](?:\s*-\s*[1-9])?)",
     re.I,
 )
-
-# HSK entries have:
-# number + Chinese + pinyin + POS + definition
-# POS/definition may be absent for some Level 7-9 entries.
 HSK_ENTRY_RE = re.compile(
     r"^(?P<number>\d+)\s+"
     r"(?P<word>\S+)\s+"
     r"(?P<pinyin>\S+)"
     r"(?:\s+(?P<rest>.*))?$"
-)
-
-HSK_LEVEL_RE = re.compile(
-    r"(?:NEW\s+HSK\s+VOCABULARY\s*)?"
-    r"LEVEL\s*([1-9](?:\s*-\s*[1-9])?)",
-    re.I,
 )
 
 HSK_EXPECTED = {
@@ -69,6 +42,7 @@ HSK_EXPECTED = {
 }
 
 ZH_POS = {
+    "能愿": "modal",
     "名": "noun",
     "动": "verb",
     "形": "adjective",
@@ -79,35 +53,47 @@ ZH_POS = {
     "助": "particle",
     "量": "classifier",
     "数": "number",
-    "能愿": "modal",
+}
+
+OXFORD_POS = {
+    "n.": "noun",
+    "v.": "verb",
+    "adj.": "adjective",
+    "adv.": "adverb",
+    "pron.": "pronoun",
+    "prep.": "preposition",
+    "conj.": "conjunction",
+    "det.": "determiner",
+    "exclam.": "exclamation",
+    "modal v.": "modal verb",
+    "auxiliary v.": "auxiliary verb",
+    "auxiliary": "auxiliary",
+    "article": "article",
+    "number": "number",
+    "infinitive": "infinitive",
 }
 
 
-# ============================================================
-# General helpers
-# ============================================================
+def log(message: str) -> None:
+    print(message, flush=True)
+
 
 def clean(text: str | None) -> str:
     if text is None:
         return ""
-
-    text = str(text)
-    text = unicodedata.normalize("NFKC", text)
+    text = unicodedata.normalize("NFKC", str(text))
     text = text.replace("\u00ad", "")
     text = text.replace("\ufeff", "")
     text = text.replace("\ufffd", "")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def normalize_unicode(text: str) -> str:
-    """NFKC is essential for the HSK PDF's compatibility characters."""
+def normalize_unicode(text: str | None) -> str:
     return unicodedata.normalize("NFKC", text or "")
 
 
 def has_hanzi(text: str) -> bool:
-    text = normalize_unicode(text)
-    return bool(HANZI_RE.search(text))
+    return bool(HANZI_RE.search(normalize_unicode(text)))
 
 
 def suppress_pdf_font_warnings() -> None:
@@ -123,156 +109,58 @@ def open_pdf(path: Path):
     return pdfplumber.open(path)
 
 
-# ============================================================
-# Oxford 5000
-# ============================================================
-
 def normalize_oxford_pos(text: str) -> str:
-    text = clean(text)
-
-    mapping = {
-        "n.": "noun",
-        "v.": "verb",
-        "adj.": "adjective",
-        "adv.": "adverb",
-        "pron.": "pronoun",
-        "prep.": "preposition",
-        "conj.": "conjunction",
-        "det.": "determiner",
-        "exclam.": "exclamation",
-        "modal v.": "modal verb",
-        "number": "number",
-        "article": "article",
-        "auxiliary": "auxiliary",
-        "infinitive": "infinitive",
-    }
-
-    parts = []
-    for piece in re.split(r"\s*,\s*", text):
-        piece = clean(piece)
-        if piece in mapping and mapping[piece] not in parts:
-            parts.append(mapping[piece])
-
-    return ", ".join(parts)
+    text = clean(text).replace(";", ",")
+    text = re.sub(r"[/|]+", ",", text)
+    found = []
+    for key in sorted(OXFORD_POS, key=len, reverse=True):
+        if re.search(rf"(?<![A-Za-z]){re.escape(key)}(?![A-Za-z])", text, re.I):
+            value = OXFORD_POS[key]
+            if value not in found:
+                found.append(value)
+    return ", ".join(found)
 
 
 def looks_like_oxford_word(text: str) -> bool:
     text = clean(text)
-
-    if not text:
-        return False
-
-    # Vocabulary may contain spaces, hyphens, apostrophes and numbers.
     return bool(
-        re.fullmatch(
-            r"[A-Za-z][A-Za-z0-9'’\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'’\-]*)*",
+        text
+        and re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9'’\-]*"
+            r"(?:\s+[A-Za-z0-9][A-Za-z0-9'’\-]*)*",
             text,
         )
     )
 
 
-def parse_oxford_cell(cell_text: str, level: str):
-    """
-    Parse one Oxford vocabulary entry.
-
-    Oxford uses several POS formats, including:
-
-        n.
-        v.
-        adj.
-        adv.
-        det./adj.
-        det./pron.
-        exclam./n.
-        modal v.
-        auxiliary v.
-        article
-        number
-        infinitive
-
-    Some entries also contain a parenthetical clarification instead of
-    an explicit POS marker, e.g.:
-
-        match (contest/correspond)
-
-    Those are retained with an empty POS rather than being discarded.
-    """
-
-    text = clean(cell_text)
-
+def parse_oxford_cell(cell_text: str, level: str) -> dict[str, Any] | None:
+    text = re.sub(r"^[•·]+", "", clean(cell_text))
     if not text:
         return None
 
-    text = re.sub(r"^[•·]+", "", text).strip()
-
-    # --------------------------------------------------------
-    # POS patterns
-    # --------------------------------------------------------
-
     pos_pattern = re.compile(
-        r"(?:"
-        r"modal\s+v\."
-        r"|auxiliary\s+v\."
-        r"|infinitive"
-        r"|article"
-        r"|number"
-        r"|n\."
-        r"|v\."
-        r"|adj\."
-        r"|adv\."
-        r"|pron\."
-        r"|prep\."
-        r"|conj\."
-        r"|det\."
-        r"|exclam\."
-        r")",
+        r"(?:modal\s+v\.|auxiliary\s+v\.|infinitive|article|number|"
+        r"n\.|v\.|adj\.|adv\.|pron\.|prep\.|conj\.|det\.|exclam\.)",
         re.I,
     )
-
     match = pos_pattern.search(text)
 
-    # --------------------------------------------------------
-    # Normal POS entry
-    # --------------------------------------------------------
-
     if match:
-
-        word = clean(text[:match.start()])
-        pos_text = clean(text[match.start():])
-
-        # Remove common Oxford punctuation between POS labels.
-        pos_text = pos_text.replace(";", ",")
-        pos_text = re.sub(r"/", ",", pos_text)
-
+        word = clean(text[: match.start()])
         if not looks_like_oxford_word(word):
             return None
-
-        pos = normalize_oxford_pos_flexible(pos_text)
-
         return {
             "id": "",
             "lang": "en",
             "word": word.lower(),
             "pinyin": "",
-            "pos": pos,
+            "pos": normalize_oxford_pos(text[match.start() :]),
             "definition": "",
             "level": level,
             "source": "",
         }
 
-    # --------------------------------------------------------
-    # Entries without explicit POS
-    #
-    # Example:
-    #     match (contest/correspond)
-    #
-    # Retain them rather than throwing them away.
-    # --------------------------------------------------------
-
-    word = text
-
-    # Remove obvious page/header material.
-    if word.lower() in {
+    if text.lower() in {
         "level",
         "by cefr",
         "words to learn in english",
@@ -280,19 +168,9 @@ def parse_oxford_cell(cell_text: str, level: str):
     }:
         return None
 
-    # Remove parenthetical sense information from the vocabulary
-    # word only when the whole entry clearly follows:
-    #
-    #     word (clarification)
-    #
-    # We retain the clarification as the definition.
     definition = ""
-
-    parenthetical = re.match(
-        r"^(?P<word>.+?)\s+\((?P<definition>.+)\)$",
-        text,
-    )
-
+    parenthetical = re.match(r"^(?P<word>.+?)\s+\((?P<definition>.+)\)$", text)
+    word = text
     if parenthetical:
         word = clean(parenthetical.group("word"))
         definition = clean(parenthetical.group("definition"))
@@ -311,330 +189,147 @@ def parse_oxford_cell(cell_text: str, level: str):
         "source": "",
     }
 
-def normalize_oxford_pos_flexible(text: str) -> str:
-    text = clean(text)
 
-    mapping = {
-        "n.": "noun",
-        "v.": "verb",
-        "adj.": "adjective",
-        "adv.": "adverb",
-        "pron.": "pronoun",
-        "prep.": "preposition",
-        "conj.": "conjunction",
-        "det.": "determiner",
-        "exclam.": "exclamation",
-        "modal v.": "modal verb",
-        "auxiliary v.": "auxiliary verb",
-        "auxiliary": "auxiliary",
-        "article": "article",
-        "number": "number",
-        "infinitive": "infinitive",
-    }
-
-    found = []
-
-    # Normalize separators used by Oxford.
-    text = text.replace(";", ",")
-    text = re.sub(r"/", ",", text)
-
-    # Match longest forms first.
-    patterns = sorted(
-        mapping.keys(),
-        key=len,
-        reverse=True,
-    )
-
-    for pattern in patterns:
-
-        if re.search(
-            rf"(?<![A-Za-z]){re.escape(pattern)}(?![A-Za-z])",
-            text,
-            re.I,
-        ):
-            value = mapping[pattern]
-
-            if value not in found:
-                found.append(value)
-
-    return ", ".join(found)
-    
-def get_page_columns(page):
-    """
-    Recover the ACTUAL four visual vocabulary columns used by the
-    Oxford PDF.
-
-    The PDF is physically arranged as four vocabulary columns across
-    the page, but pdfplumber's word extraction can make the two
-    side-by-side vocabulary streams appear merged.
-
-    We therefore divide the page using its horizontal midpoint first,
-    then divide each half vertically into its two actual columns.
-    """
-
+def get_page_columns(page) -> list[list[dict[str, Any]]]:
     words = page.extract_words(
         x_tolerance=1.5,
         y_tolerance=2,
         keep_blank_chars=False,
     )
-
     if not words:
         return []
 
-    page_width = float(page.width)
-    midpoint = page_width / 2
-
+    midpoint = float(page.width) / 2
     left = []
     right = []
-
     for word in words:
-        x0 = float(word["x0"])
-        x1 = float(word["x1"])
-        centre = (x0 + x1) / 2
+        centre = (float(word["x0"]) + float(word["x1"])) / 2
+        (left if centre < midpoint else right).append(word)
 
-        if centre < midpoint:
-            left.append(word)
-        else:
-            right.append(word)
-
-    # Sort each half by x-coordinate.
-    left.sort(key=lambda w: float(w["x0"]))
-    right.sort(key=lambda w: float(w["x0"]))
-
-    def split_half(words):
-        if not words:
-            return []
-
-        xs = sorted(
-            [
-                (
-                    (float(w["x0"]) + float(w["x1"])) / 2,
-                    index,
-                    w,
-                )
-                for index, w in enumerate(words)
-            ],
-            key=lambda item: item[0],
-        )
-
-        # Find the largest horizontal gap inside this half.
+    def split_half(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        if len(items) < 2:
+            return [items] if items else []
+        ordered = sorted(items, key=lambda item: float(item["x0"]))
         gaps = []
-
-        for i in range(1, len(xs)):
-            gap = xs[i][0] - xs[i - 1][0]
-            gaps.append((gap, i))
-
-        if not gaps:
-            return [words]
-
-        largest_gap, split_index = max(
-            gaps,
-            key=lambda item: item[0],
-        )
-
-        # If there isn't a meaningful gap, keep the half intact.
-        if largest_gap < page_width * 0.02:
-            return [words]
-
-        first = [
-            item[2]
-            for item in xs[:split_index]
-        ]
-
-        second = [
-            item[2]
-            for item in xs[split_index:]
-        ]
-
-        return [first, second]
+        for index in range(1, len(ordered)):
+            gap = float(ordered[index]["x0"]) - float(ordered[index - 1]["x1"])
+            gaps.append((gap, index))
+        largest_gap, split_index = max(gaps, key=lambda pair: pair[0])
+        if largest_gap <= float(page.width) * 0.02:
+            return [ordered]
+        return [ordered[:split_index], ordered[split_index:]]
 
     columns = split_half(left) + split_half(right)
-
-    return [
-        column
-        for column in columns
-        if len(column) >= 2
-    ]
+    return [column for column in columns if len(column) >= 2]
 
 
-def column_lines(words):
-    """Turn coordinate-positioned PDF words into visual lines."""
+def column_lines(words: list[dict[str, Any]]) -> list[str]:
     if not words:
         return []
 
-    words = sorted(
+    ordered = sorted(
         words,
-        key=lambda w: (
-            round(float(w["top"]), 1),
-            float(w["x0"]),
-        ),
+        key=lambda word: (round(float(word["top"]), 1), float(word["x0"])),
     )
+    lines: list[list[dict[str, Any]]] = []
 
-    lines = []
-
-    for word in words:
+    for word in ordered:
         top = float(word["top"])
-
         target = None
-
         for line in reversed(lines[-3:]):
-            avg_top = sum(x["_top"] for x in line) / len(line)
-            if abs(top - avg_top) <= 3.0:
+            average_top = sum(item["_top"] for item in line) / len(line)
+            if abs(top - average_top) <= 3.0:
                 target = line
                 break
-
+        item = {**word, "_top": top}
         if target is None:
-            lines.append([{
-                **word,
-                "_top": top,
-            }])
+            lines.append([item])
         else:
-            target.append({
-                **word,
-                "_top": top,
-            })
+            target.append(item)
 
     result = []
-
     for line in lines:
-        line.sort(key=lambda w: float(w["x0"]))
-        text = clean(" ".join(w["text"] for w in line))
-
+        line.sort(key=lambda word: float(word["x0"]))
+        text = clean(" ".join(word["text"] for word in line))
         if text:
             result.append(text)
-
     return result
 
 
-def parse_english(path: Path) -> list[dict]:
-    """
-    Extract Oxford 5000 from the actual multi-column PDF.
-
-    CEFR headings are carried forward. Individual columns are processed
-    separately so entries from adjacent columns cannot merge together.
-    """
+def parse_english(path: Path) -> list[dict[str, Any]]:
     results = []
     current_level = ""
 
     with open_pdf(path) as pdf:
         for page_number, page in enumerate(pdf.pages, 1):
-
-            # First look for CEFR heading in the page text.
             page_text = clean(page.extract_text() or "")
+            headings = re.findall(r"\b(?:A1|A2|B1|B2|C1)\b", page_text, re.I)
+            if headings:
+                current_level = headings[-1].upper()
 
-            for possible in re.findall(
-                r"\b(?:A1|A2|B1|B2|C1)\b",
-                page_text,
-                re.I,
-            ):
-                current_level = possible.upper()
-
-            columns = get_page_columns(page)
-
-            for column in columns:
-                lines = column_lines(column)
-
-                if page_number >= 10:
-                    for line in lines:
-                        if line in {"A1", "A2", "B1", "B2", "C1"}:
-                            print(
-                                f"\nFOUND CEFR {line} "
-                                f"ON PAGE {page_number}"
-                            )
-            
-                for line in lines:
-                    level_match = OXFORD_LEVEL_RE.fullmatch(clean(line))
+            for column in get_page_columns(page):
+                for line in column_lines(column):
+                    level_match = OXFORD_LEVEL_RE.fullmatch(line)
                     if level_match:
                         current_level = level_match.group(1).upper()
                         continue
-
                     if not current_level:
                         continue
-
                     entry = parse_oxford_cell(line, current_level)
-
                     if entry:
                         entry["_page"] = page_number
                         results.append(entry)
 
-    # Remove duplicates while preserving first occurrence.
     unique = {}
-
     for row in results:
-        key = row["word"]
-
-        if key not in unique:
-            unique[key] = row
+        unique.setdefault(row["word"], row)
 
     results = list(unique.values())
-
-    for i, row in enumerate(results, 1):
-        row["id"] = f"en_{i:05}"
+    for index, row in enumerate(results, 1):
+        row["id"] = f"en_{index:05}"
         row["source"] = path.name
         row.pop("_page", None)
-
     return results
 
 
-# ============================================================
-# HSK 1-9
-# ============================================================
-
 def normalize_zh_pos(text: str) -> str:
     text = clean(text)
-
     found = []
-
-    # Longest marker first.
     for key in sorted(ZH_POS, key=len, reverse=True):
         if key in text and ZH_POS[key] not in found:
             found.append(ZH_POS[key])
-
     return ", ".join(found)
 
 
-def parse_hsk_entry_line(line: str, level: str):
-    line = clean(line)
-
-    match = HSK_ENTRY_RE.match(line)
-
+def parse_hsk_entry_line(line: str, level: str) -> dict[str, Any] | None:
+    match = HSK_ENTRY_RE.match(clean(line))
     if not match:
         return None
 
-    number = match.group("number")
     word = normalize_unicode(clean(match.group("word")))
-    pinyin = clean(match.group("pinyin"))
-    rest = clean(match.group("rest"))
-
     if not has_hanzi(word):
         return None
 
+    rest = clean(match.group("rest"))
+    pinyin = clean(match.group("pinyin"))
     pos = ""
-    definition = ""
+    definition = rest
 
-    if rest:
-        # POS usually appears immediately after pinyin.
-        pos_match = re.match(
-            r"^(?P<pos>"
-            r"(?:名|动|形|副|代|介|连|助|量|数|能愿)"
-            r"(?:\s*[、,]\s*(?:名|动|形|副|代|介|连|助|量|数|能愿))*"
-            r"|(?:noun|verb|adjective|adverb|pronoun|preposition|"
-            r"conjunction|particle|classifier|number)"
-            r"(?:\s*[,、]\s*(?:noun|verb|adjective|adverb|pronoun|"
-            r"preposition|conjunction|particle|classifier|number))*"
-            r")\s*",
-            rest,
-            re.I,
-        )
-
-        if pos_match:
-            pos = normalize_zh_pos(pos_match.group("pos"))
-            if not pos:
-                pos = clean(pos_match.group("pos"))
-            definition = clean(rest[pos_match.end():])
-        else:
-            # Level 7-9 often has no translation/POS in this PDF.
-            definition = rest
+    pos_pattern = re.compile(
+        r"^(?P<pos>"
+        r"(?:能愿|名|动|形|副|代|介|连|助|量|数)"
+        r"(?:\s*[、,]\s*(?:能愿|名|动|形|副|代|介|连|助|量|数))*"
+        r"|(?:noun|verb|adjective|adverb|pronoun|preposition|"
+        r"conjunction|particle|classifier|number)"
+        r"(?:\s*[,、]\s*(?:noun|verb|adjective|adverb|pronoun|"
+        r"preposition|conjunction|particle|classifier|number))*"
+        r")\s*",
+        re.I,
+    )
+    pos_match = pos_pattern.match(rest)
+    if pos_match:
+        pos = normalize_zh_pos(pos_match.group("pos")) or clean(pos_match.group("pos"))
+        definition = clean(rest[pos_match.end() :])
 
     return {
         "id": "",
@@ -645,615 +340,426 @@ def parse_hsk_entry_line(line: str, level: str):
         "definition": definition,
         "level": level,
         "source": "",
-        "_number": int(number),
+        "_number": int(match.group("number")),
     }
 
 
-def detect_hsk_level(text: str):
-    text = normalize_unicode(text)
-
-    match = HSK_LEVEL_RE.search(text)
-
+def detect_hsk_level(text: str) -> str | None:
+    match = HSK_LEVEL_RE.search(normalize_unicode(text))
     if not match:
         return None
-
     raw = re.sub(r"\s+", "", match.group(1))
-
-    if "-" in raw:
-        parts = raw.split("-")
-        return f"HSK {parts[0]}-{parts[-1]}"
-
     return f"HSK {raw}"
 
 
-def parse_hsk(path: Path) -> list[dict]:
-    """
-    Parse all HSK sections in the supplied 11,000-word PDF.
+def parse_hsk(path: Path, diagnostic: bool = False) -> list[dict[str, Any]]:
+    if diagnostic:
+        with open_pdf(path) as pdf:
+            log("\n" + "=" * 70)
+            log("HSK PDF DIAGNOSTIC — FIRST 5 PAGES")
+            for page_number, page in enumerate(pdf.pages[:5], 1):
+                log(f"\n--- PAGE {page_number} ---")
+                log((page.extract_text() or "")[:5000])
+            log("=" * 70)
 
-    The parser keeps each section separate so we can validate against:
-        HSK1   300
-        HSK2   200
-        HSK3   500
-        HSK4  1000
-        HSK5  1600
-        HSK6  1800
-        HSK7-9 5600
-    """
-    
-        # --------------------------------------------------------
-    # TEMPORARY HSK PDF DIAGNOSTIC
-    # --------------------------------------------------------
-
-    with open_pdf(path) as pdf:
-        print("\n" + "=" * 70)
-        print("HSK PDF DIAGNOSTIC — FIRST 5 PAGES")
-        print("=" * 70)
-
-        for page_number, page in enumerate(pdf.pages[:5], 1):
-            print(f"\n--- PAGE {page_number} ---")
-
-            text = page.extract_text() or ""
-
-            print(text[:5000])
-
-        print("\n" + "=" * 70)
-        print("END HSK DIAGNOSTIC")
-        print("=" * 70)
-        
     results = []
     current_level = None
     pending = None
 
-    counts = {}
-
     with open_pdf(path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-
-            for raw_line in text.splitlines():
+        for page_number, page in enumerate(pdf.pages, 1):
+            for raw_line in (page.extract_text() or "").splitlines():
                 line = clean(raw_line)
-
                 if not line:
                     continue
 
                 level = detect_hsk_level(line)
-
                 if level:
-                    # Finish previous wrapped entry.
                     if pending:
                         results.append(pending)
                         pending = None
-
                     current_level = level
-                    counts.setdefault(current_level, 0)
                     continue
 
                 if current_level is None:
                     continue
 
                 upper = line.upper()
-
                 if (
                     "NO. WORD PINYIN" in upper
                     or upper == "ENTRIES"
                     or "MANDARINBEAN.COM PAGE" in upper
-                    or line.startswith("⇨")
-                    or line.startswith(">>>")
+                    or line.startswith(("⇨", ">>>"))
                 ):
                     continue
 
                 parsed = parse_hsk_entry_line(line, current_level)
-
                 if parsed:
                     if pending:
                         results.append(pending)
-
                     pending = parsed
                     continue
 
-                # A line that is not a new numbered entry can be:
-                #   - continuation of the translation
-                #   - continuation of POS
-                #   - a wrapped Level 7-9 entry
-                if pending:
-                    continuation = normalize_unicode(line)
-
-                    if not re.fullmatch(r"\d+", continuation):
-                        pending["definition"] = clean(
-                            f'{pending["definition"]} {continuation}'
-                        )
+                if pending and not re.fullmatch(r"\d+", line):
+                    pending["definition"] = clean(
+                        f'{pending["definition"]} {normalize_unicode(line)}'
+                    )
 
     if pending:
         results.append(pending)
 
-    # Deduplicate by Chinese word, but preserve the first HSK level.
     unique = {}
-
     for row in results:
         row.pop("_number", None)
-
-        key = row["word"]
-
-        if key not in unique:
-            unique[key] = row
-        else:
-            # If the duplicate has a richer definition, retain it.
-            if len(row["definition"]) > len(unique[key]["definition"]):
-                unique[key]["definition"] = row["definition"]
+        existing = unique.get(row["word"])
+        if existing is None or len(row["definition"]) > len(existing["definition"]):
+            unique[row["word"]] = row
 
     results = list(unique.values())
-
-    for i, row in enumerate(results, 1):
-        row["id"] = f"zh_{i:05}"
+    for index, row in enumerate(results, 1):
+        row["id"] = f"zh_{index:05}"
         row["source"] = path.name
-
     return results
 
 
-# ============================================================
-# Validation
-# ============================================================
-
-def validate_english(rows: list[dict]) -> None:
-    print("\nOxford CEFR extraction check:")
-
-    counts = {}
-
+def validate_english(rows: list[dict[str, Any]]) -> None:
+    counts = defaultdict(int)
     for row in rows:
-        counts[row["level"]] = counts.get(row["level"], 0) + 1
+        counts[row["level"]] += 1
 
-    for level in ["A1", "A2", "B1", "B2", "C1"]:
-        print(f"  {level}: {counts.get(level, 0):,}")
-
-    print(f"  TOTAL: {len(rows):,}")
+    log("\nOxford CEFR extraction check:")
+    for level in ("A1", "A2", "B1", "B2", "C1"):
+        log(f" {level}: {counts[level]:,}")
+    log(f" TOTAL: {len(rows):,}")
 
     if len(rows) < 4000:
         raise RuntimeError(
-            f"Oxford extraction is still too low: {len(rows):,}. "
-            "The program will NOT continue to semantic embedding."
+            f"Oxford extraction is too low: {len(rows):,}. "
+            "The program will not continue."
         )
-
     if len(rows) > 5500:
-        print(
-            "Warning: Oxford extraction is above 5,500. "
-            "Check for duplicate/header entries."
-        )
+        log("Warning: Oxford extraction is above 5,500; check duplicates.")
 
 
-def validate_hsk(rows: list[dict]) -> None:
-    counts = {}
-
+def validate_hsk(rows: list[dict[str, Any]], strict: bool = False) -> None:
+    counts = defaultdict(int)
     for row in rows:
-        level = row["level"]
-        counts[level] = counts.get(level, 0) + 1
+        counts[row["level"]] += 1
 
-    print("\nHSK extraction check:")
-
+    log("\nHSK extraction check:")
     for level, expected in HSK_EXPECTED.items():
-        actual = counts.get(level, 0)
-        print(
-            f"  {level:<8} {actual:>6,} / expected {expected:,}"
-        )
+        log(f" {level:<8} {counts[level]:>6,} / expected {expected:,}")
+    log(f" TOTAL: {len(rows):,} / expected 11,000")
 
-    print(f"  TOTAL:   {len(rows):,} / expected 11,000")
-
-    # We need essentially the whole vocabulary before building the graph.
     if len(rows) < 10000:
         raise RuntimeError(
-            f"HSK extraction is still too low: {len(rows):,} / 11,000. "
-            "The program will NOT continue to semantic embedding."
+            f"HSK extraction is too low: {len(rows):,}/11,000. "
+            "The program will not continue."
         )
+    if strict and len(rows) != 11000:
+        raise RuntimeError(
+            f"Strict HSK validation failed: {len(rows):,}/11,000 entries."
+        )
+    if len(rows) != 11000:
+        log("Warning: HSK extraction is incomplete; continuing in non-strict mode.")
 
 
-# ============================================================
-# WordNet
-# ============================================================
+@lru_cache(maxsize=None)
+def wordnet_definition(word: str) -> str:
+    try:
+        from nltk.corpus import wordnet as wn
+        synsets = wn.synsets(word)
+        return synsets[0].definition() if synsets else ""
+    except Exception:
+        return ""
 
-def add_wordnet_definitions(rows: list[dict]) -> list[dict]:
+
+def add_wordnet_definitions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     try:
         import nltk
         from nltk.corpus import wordnet as wn
-    except ImportError:
-        print(
-            "Warning: NLTK unavailable; WordNet skipped.",
-            file=sys.stderr,
-        )
+        try:
+            wn.synsets("test")
+        except LookupError:
+            log("Downloading NLTK WordNet data...")
+            nltk.download("wordnet", quiet=False)
+            nltk.download("omw-1.4", quiet=False)
+            wn.synsets("test")
+    except Exception as exc:
+        log(f"Warning: WordNet unavailable; definitions skipped: {exc}")
         return rows
 
-    try:
-        wn.synsets("test")
-    except LookupError:
-        try:
-            nltk.download("wordnet", quiet=True)
-            nltk.download("omw-1.4", quiet=True)
-        except Exception as exc:
-            print(
-                f"Warning: WordNet download failed: {exc}",
-                file=sys.stderr,
-            )
-            return rows
-
-    for row in rows:
-        if row["lang"] != "en" or row["definition"]:
-            continue
-
-        try:
-            synsets = wn.synsets(row["word"])
-        except Exception:
-            synsets = []
-
-        if synsets:
-            row["definition"] = synsets[0].definition()
-
+    english_rows = [row for row in rows if row["lang"] == "en" and not row["definition"]]
+    log(f"Looking up WordNet definitions for {len(english_rows):,} entries...")
+    for index, row in enumerate(english_rows, 1):
+        definition = wordnet_definition(row["word"])
+        if definition:
+            row["definition"] = definition
+        if index % 500 == 0:
+            log(f" WordNet progress: {index:,}/{len(english_rows):,}")
     return rows
 
 
-# ============================================================
-# Radicals
-# ============================================================
+_RADICAL_FINDER = None
 
-def radicals(word: str) -> list[str]:
-    word = normalize_unicode(word)
 
-    try:
+def get_radical_finder():
+    global _RADICAL_FINDER
+    if _RADICAL_FINDER is None:
         from cjkradlib import RadicalFinder
+        _RADICAL_FINDER = RadicalFinder(lang="zh")
+    return _RADICAL_FINDER
 
-        finder = RadicalFinder(lang="zh")
+
+@lru_cache(maxsize=None)
+def radicals(word: str) -> tuple[str, ...]:
+    word = normalize_unicode(word)
+    try:
+        finder = get_radical_finder()
         found = []
-
         for char in word:
             if not has_hanzi(char):
                 continue
-
             try:
                 result = finder.search(char)
-                values = list(
-                    getattr(result, "compositions", []) or []
-                )
+                values = list(getattr(result, "compositions", []) or [])
                 found.extend(values if values else [char])
             except Exception:
                 found.append(char)
-
-        return sorted(set(found))
-
+        return tuple(sorted(set(found)))
     except Exception:
-        return sorted(
-            set(char for char in word if has_hanzi(char))
-        )
+        return tuple(sorted(set(char for char in word if has_hanzi(char))))
 
 
-# ============================================================
-# Semantic graph
-# ============================================================
+def prepare_embedding_rows(rows: list[dict[str, Any]]) -> list[str]:
+    texts = []
+    total = len(rows)
+    log(f"Preparing {total:,} embedding texts and radicals...")
 
-def make_graph(rows: list[dict], threshold: float = 0.78):
+    for index, row in enumerate(rows, 1):
+        row["radicals"] = list(radicals(row["word"])) if row["lang"] == "zh" else []
+        pieces = [row["word"], row["definition"], row["pos"]]
+        if row["lang"] == "zh":
+            pieces.append(row["pinyin"])
+            pieces.append(" ".join(row["radicals"]))
+        text = " | ".join(clean(piece) for piece in pieces if clean(piece))
+        row["embedding_text"] = text
+        texts.append(text)
+
+        if index % 500 == 0 or index == total:
+            log(f" Prepared {index:,}/{total:,} entries")
+    return texts
+
+
+def make_graph(rows: list[dict[str, Any]], threshold: float = 0.78, batch_size: int = 64):
     try:
         from sentence_transformers import SentenceTransformer
         from sklearn.neighbors import NearestNeighbors
     except ImportError as exc:
         raise RuntimeError(
-            "Missing dependencies. Install:\n"
-            "pip install sentence-transformers scikit-learn"
+            "Missing dependencies. Install sentence-transformers, scikit-learn, "
+            "pandas, pdfplumber, nltk, and cjkradlib."
         ) from exc
 
-    for row in rows:
-        row["radicals"] = (
-            radicals(row["word"])
-            if row["lang"] == "zh"
-            else []
-        )
+    if not rows:
+        return {}, {}, []
 
-        pieces = [
-            row["word"],
-            row["definition"],
-            row["pos"],
-            row["pinyin"] if row["lang"] == "zh" else "",
-        ]
+    texts = prepare_embedding_rows(rows)
 
-        row["embedding_text"] = " | ".join(
-            clean(x) for x in pieces if clean(x)
-        )
+    log("Loading multilingual embedding model...")
+    model_start = time.perf_counter()
+    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    log(f"Model loaded in {time.perf_counter() - model_start:.1f}s")
 
-    print("\nLoading multilingual embedding model...")
-    model = SentenceTransformer(
-        "paraphrase-multilingual-MiniLM-L12-v2"
-    )
-
-    print(f"Encoding {len(rows):,} vocabulary entries...")
-
+    log(f"Encoding {len(texts):,} vocabulary entries...")
+    encoding_start = time.perf_counter()
     vectors = model.encode(
-        [row["embedding_text"] for row in rows],
+        texts,
         normalize_embeddings=True,
         show_progress_bar=True,
-        batch_size=64,
+        batch_size=batch_size,
     )
+    log(f"Encoding completed in {time.perf_counter() - encoding_start:.1f}s")
 
-    k = min(30, len(rows))
-
-    if k < 2:
-        concepts = {
+    if len(rows) == 1:
+        member = dict(rows[0])
+        member.pop("embedding_text", None)
+        return {
             "concept_00001": {
                 "id": "concept_00001",
                 "definition": rows[0]["definition"],
-                "members": [rows[0]],
+                "members": [member],
             }
-        }
-        return concepts, {}, []
+        }, {}, []
 
-    nn = NearestNeighbors(
-        n_neighbors=k,
-        metric="cosine",
-        n_jobs=-1,
-    ).fit(vectors)
-
+    k = min(30, len(rows))
+    log(f"Building nearest-neighbour index with k={k}...")
+    neighbour_start = time.perf_counter()
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=-1).fit(vectors)
     distances, indexes = nn.kneighbors(vectors)
+    log(f"Nearest-neighbour search completed in {time.perf_counter() - neighbour_start:.1f}s")
 
     parent = list(range(len(rows)))
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
 
-    def union(a, b):
-        a, b = find(a), find(b)
-        if a != b:
-            parent[b] = a
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
 
     review = []
+    total_links = len(rows)
+    log(f"Processing up to {total_links * (k - 1):,} graph links...")
 
-    for i in range(len(rows)):
-        for distance, j in zip(
-            distances[i][1:],
-            indexes[i][1:],
-        ):
+    for index in range(len(rows)):
+        for distance, neighbour in zip(distances[index][1:], indexes[index][1:]):
             score = 1.0 - float(distance)
-
+            neighbour = int(neighbour)
             if score >= threshold:
-                union(i, int(j))
-
-            elif (
-                score >= threshold - 0.06
-                and rows[i]["lang"] != rows[int(j)]["lang"]
-            ):
+                union(index, neighbour)
+            elif score >= threshold - 0.06 and rows[index]["lang"] != rows[neighbour]["lang"]:
                 review.append({
-                    "entry_a": rows[i]["id"],
-                    "word_a": rows[i]["word"],
-                    "entry_b": rows[int(j)]["id"],
-                    "word_b": rows[int(j)]["word"],
+                    "entry_a": rows[index]["id"],
+                    "word_a": rows[index]["word"],
+                    "entry_b": rows[neighbour]["id"],
+                    "word_b": rows[neighbour]["word"],
                     "similarity": round(score, 4),
                 })
 
-    groups = {}
+        if (index + 1) % 1000 == 0 or index + 1 == len(rows):
+            log(f" Graph progress: {index + 1:,}/{len(rows):,}")
 
-    for i, row in enumerate(rows):
-        groups.setdefault(find(i), []).append(row)
+    groups = defaultdict(list)
+    for index, row in enumerate(rows):
+        groups[find(index)].append(row)
 
     concepts = {}
-    radical_index = {}
+    radical_index = defaultdict(set)
+    log(f"Creating {len(groups):,} concept groups...")
 
     for number, members in enumerate(groups.values(), 1):
         concept_id = f"concept_{number:05}"
+        label = max(members, key=lambda item: len(item["definition"]))
+        clean_members = []
 
-        label = max(
-            members,
-            key=lambda x: len(x["definition"]),
-        )
+        for member in members:
+            clean_member = {
+                key: member.get(key, "")
+                for key in [
+                    "id", "lang", "word", "pinyin", "pos", "definition",
+                    "level", "radicals",
+                ]
+            }
+            clean_members.append(clean_member)
+            for radical in member.get("radicals", []):
+                radical_index[radical].add(concept_id)
 
         concepts[concept_id] = {
             "id": concept_id,
             "definition": label["definition"],
-            "members": [
-                {
-                    key: member[key]
-                    for key in [
-                        "id",
-                        "lang",
-                        "word",
-                        "pinyin",
-                        "pos",
-                        "definition",
-                        "level",
-                        "radicals",
-                    ]
-                }
-                for member in members
-            ],
+            "members": clean_members,
         }
 
-        for member in members:
-            for radical in member["radicals"]:
-                radical_index.setdefault(
-                    radical,
-                    [],
-                ).append(concept_id)
+    return concepts, {key: sorted(value) for key, value in radical_index.items()}, review
 
-    return concepts, radical_index, review
-
-
-# ============================================================
-# File resolution
-# ============================================================
 
 def resolve_pdf(requested: str, label: str) -> Path:
     path = Path(requested).expanduser()
-
-    candidates = []
-
-    if path.is_absolute():
-        candidates.append(path)
-    else:
-        candidates.extend([
-            Path.cwd() / path,
-            Path(__file__).resolve().parent / path,
-            Path.home() / "Downloads" / path.name,
-            Path.home() / "Desktop" / path.name,
-            Path.home() / "Documents" / path.name,
-        ])
-
+    candidates = [path] if path.is_absolute() else [
+        Path.cwd() / path,
+        Path(__file__).resolve().parent / path,
+        Path.home() / "Downloads" / path.name,
+        Path.home() / "Desktop" / path.name,
+        Path.home() / "Documents" / path.name,
+    ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
-
-    checked = "\n".join(
-        f"  - {candidate}"
-        for candidate in candidates
-    )
-
+    checked = "\n".join(f" - {candidate}" for candidate in candidates)
     raise FileNotFoundError(
-        f"{label} PDF not found.\n\n"
-        f"Requested: {requested}\n\n"
-        f"Checked:\n{checked}"
+        f"{label} PDF not found.\nRequested: {requested}\nChecked:\n{checked}"
     )
 
 
-# ============================================================
-# Main
-# ============================================================
-
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Build a bilingual English-Chinese vocabulary "
-            "semantic concept graph."
-        )
+        description="Build a bilingual English-Chinese vocabulary semantic concept graph."
     )
-
-    parser.add_argument(
-        "--english",
-        default="ENGLISH.pdf",
-    )
-
-    parser.add_argument(
-        "--hsk",
-        default="HSK.pdf",
-    )
-
-    parser.add_argument(
-        "--out",
-        default="output",
-    )
-
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.78,
-    )
-
+    parser.add_argument("--english", default="ENGLISH.pdf")
+    parser.add_argument("--hsk", default="HSK.pdf")
+    parser.add_argument("--out", default="output")
+    parser.add_argument("--threshold", type=float, default=0.78)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--strict-hsk", action="store_true")
+    parser.add_argument("--diagnostic", action="store_true")
     args = parser.parse_args()
 
-    print("=" * 70)
-    print("VOCABULARY NODE BUILDER — CORRECTED PDF EXTRACTION")
-    print("=" * 70)
+    log("=" * 70)
+    log("VOCABULARY NODE BUILDER — PERFORMANCE-IMPROVED")
+    log("=" * 70)
 
-    english_path = resolve_pdf(
-        args.english,
-        "English",
-    )
-
-    hsk_path = resolve_pdf(
-        args.hsk,
-        "HSK",
-    )
-
-    print(f"\nEnglish PDF: {english_path}")
-    print(f"HSK PDF:     {hsk_path}")
-
+    english_path = resolve_pdf(args.english, "English")
+    hsk_path = resolve_pdf(args.hsk, "HSK")
     output = Path(args.out).resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    # --------------------------------------------------------
-    # Extraction
-    # --------------------------------------------------------
+    log(f"English PDF: {english_path}")
+    log(f"HSK PDF: {hsk_path}")
 
-    print("\n[1/5] Parsing Oxford 5000...")
+    log("\n[1/5] Parsing Oxford 5000...")
     english = parse_english(english_path)
-
-    print(
-        f"      Extracted: {len(english):,}"
-    )
-
+    log(f"Extracted: {len(english):,}")
     validate_english(english)
 
-    print("\n[2/5] Parsing HSK 1–9...")
-    chinese = parse_hsk(hsk_path)
+    log("\n[2/5] Parsing HSK 1–9...")
+    chinese = parse_hsk(hsk_path, diagnostic=args.diagnostic)
+    log(f"Extracted: {len(chinese):,}")
+    validate_hsk(chinese, strict=args.strict_hsk)
 
-    print(
-        f"      Extracted: {len(chinese):,}"
-    )
-
-    validate_hsk(chinese)
-
-    # --------------------------------------------------------
-    # Definitions
-    # --------------------------------------------------------
-
-    print("\n[3/5] Adding English WordNet definitions...")
+    log("\n[3/5] Adding English WordNet definitions...")
     english = add_wordnet_definitions(english)
-
     rows = english + chinese
+    log(f"TOTAL VOCABULARY: {len(rows):,}")
 
-    print(
-        f"\nTOTAL VOCABULARY: {len(rows):,}"
-    )
-
-    # --------------------------------------------------------
-    # Semantic graph
-    # --------------------------------------------------------
-
-    print("\n[4/5] Building semantic graph...")
-
+    log("\n[4/5] Building semantic graph...")
     concepts, radical_index, review = make_graph(
         rows,
-        args.threshold,
+        threshold=args.threshold,
+        batch_size=args.batch_size,
     )
 
-    # --------------------------------------------------------
-    # Output
-    # --------------------------------------------------------
-
-    print("\n[5/5] Writing output...")
-
-    pd.DataFrame(rows).to_csv(
+    log("\n[5/5] Writing output...")
+    pd.DataFrame(rows).drop(columns=["embedding_text"], errors="ignore").to_csv(
         output / "entries.csv",
         index=False,
         encoding="utf-8-sig",
     )
-
     (output / "concepts.json").write_text(
-        json.dumps(
-            concepts,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+        json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
     (output / "radicals.json").write_text(
-        json.dumps(
-            radical_index,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+        json.dumps(radical_index, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
     pd.DataFrame(review).drop_duplicates().to_csv(
         output / "review.csv",
         index=False,
         encoding="utf-8-sig",
     )
 
-    print("\n" + "=" * 70)
-    print("SUCCESS")
-    print("=" * 70)
-    print(f"Oxford 5000 : {len(english):,}")
-    print(f"HSK 1–9     : {len(chinese):,}")
-    print(f"TOTAL       : {len(rows):,}")
-    print(f"CONCEPTS    : {len(concepts):,}")
-    print(f"OUTPUT      : {output}")
-    print("=" * 70)
+    log("\n" + "=" * 70)
+    log("SUCCESS")
+    log("=" * 70)
+    log(f"Oxford 5000: {len(english):,}")
+    log(f"HSK 1–9: {len(chinese):,}")
+    log(f"TOTAL: {len(rows):,}")
+    log(f"CONCEPTS: {len(concepts):,}")
+    log(f"OUTPUT: {output}")
+    log("=" * 70)
 
 
 if __name__ == "__main__":
