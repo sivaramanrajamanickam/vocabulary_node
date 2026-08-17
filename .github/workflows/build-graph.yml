@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: huggingface-paraphrase-multilingual-MiniLM-L12-v2-v1
+          key: huggingface-paraphrase-multilingual-mpnet-base-v2
           restore-keys: |
             huggingface-
 
