@@ -52,16 +52,19 @@ jobs:
         run: |
           python -m nltk.downloader wordnet omw-1.4
 
-      - name: Build semantic graph
+      - name: Build typed relationship graph
         env:
           PYTHONUNBUFFERED: "1"
           TOKENIZERS_PARALLELISM: "false"
         run: |
+          rm -rf output
           python -u app.py \
             --english ENGLISH.pdf \
             --hsk HSK.pdf \
             --out output \
-            --threshold 0.78
+            --semantic-threshold 0.84 \
+            --translation-threshold 0.88 \
+            --batch-size 64
 
       - name: Upload vocabulary graph output
         if: always()
