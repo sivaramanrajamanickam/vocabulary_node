@@ -51,20 +51,26 @@ jobs:
       - name: Download NLTK WordNet data
         run: |
           python -m nltk.downloader wordnet omw-1.4
-
-      - name: Build typed relationship graph
+          
+      - name: Build language-separated graph
         env:
           PYTHONUNBUFFERED: "1"
           TOKENIZERS_PARALLELISM: "false"
+          OMP_NUM_THREADS: "4"
+          MKL_NUM_THREADS: "4"
         run: |
           rm -rf output
           python -u app.py \
             --english ENGLISH.pdf \
             --hsk HSK.pdf \
             --out output \
-            --semantic-threshold 0.84 \
-            --translation-threshold 0.88 \
-            --batch-size 64
+            --model sentence-transformers/paraphrase-multilingual-mpnet-base-v2 \
+            --semantic-threshold 0.80 \
+            --meaning-group-threshold 0.90 \
+            --translation-threshold 0.80 \
+            --same-language-k 30 \
+            --translation-k 100 \
+            --batch-size 32
 
       - name: Upload vocabulary graph output
         if: always()
