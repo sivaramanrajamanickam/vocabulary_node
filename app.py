@@ -477,19 +477,27 @@ def radicals(word: str):
     try:
         finder = get_radical_finder()
         found = []
+
         for char in normalize_unicode(word):
             if has_hanzi(char):
                 try:
                     result = finder.search(char)
-                    values = list(getattr(result, "compositions", []) or [])
+                    values = list(
+                        getattr(result, "compositions", []) or []
+                    )
                     found.extend(values if values else [char])
                 except Exception:
                     found.append(char)
+
         return tuple(sorted(set(found)))
+
     except Exception:
-        return tuple(sorted(set(char for char in word if has_hanzi(char)))
-
-
+        return tuple(
+            sorted(
+                set(char for char in word if has_hanzi(char))
+            )
+        )
+        
 def prepare_embedding_text(rows):
     texts = []
     for index, row in enumerate(rows, 1):
