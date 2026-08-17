@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pdfplumber
 
@@ -27,12 +28,8 @@ HSK_ENTRY_RE = re.compile(
 )
 
 HSK_EXPECTED = {
-    "HSK 1": 300,
-    "HSK 2": 200,
-    "HSK 3": 500,
-    "HSK 4": 1000,
-    "HSK 5": 1600,
-    "HSK 6": 1800,
+    "HSK 1": 300, "HSK 2": 200, "HSK 3": 500,
+    "HSK 4": 1000, "HSK 5": 1600, "HSK 6": 1800,
     "HSK 7-9": 5600,
 }
 
@@ -86,8 +83,9 @@ def normalize_oxford_pos(text: str) -> str:
     found = []
     for key in sorted(OXFORD_POS, key=len, reverse=True):
         if re.search(rf"(?<![A-Za-z]){re.escape(key)}(?![A-Za-z])", text, re.I):
-            if OXFORD_POS[key] not in found:
-                found.append(OXFORD_POS[key])
+            value = OXFORD_POS[key]
+            if value not in found:
+                found.append(value)
     return ", ".join(found)
 
 
@@ -97,15 +95,15 @@ def looks_like_oxford_word(text: str) -> bool:
     ))
 
 
-def parse_oxford_cell(cell_text: str, level: str) -> dict[str, Any] | None:
-    text = re.sub(r"^[•·]+", "", clean(cell_text))
+def parse_oxford_cell(text: str, level: str) -> dict[str, Any] | None:
+    text = re.sub(r"^[•·]+", "", clean(text))
     if not text:
         return None
-    pos_pattern = re.compile(
+    pattern = re.compile(
         r"(?:modal\s+v\.|auxiliary\s+v\.|infinitive|article|number|n\.|v\.|adj\.|adv\.|pron\.|prep\.|conj\.|det\.|exclam\.)",
         re.I,
     )
-    match = pos_pattern.search(text)
+    match = pattern.search(text)
     if match:
         word = clean(text[:match.start()])
         if not looks_like_oxford_word(word):
@@ -131,7 +129,7 @@ def parse_oxford_cell(cell_text: str, level: str) -> dict[str, Any] | None:
     }
 
 
-def get_page_columns(page) -> list[list[dict[str, Any]]]:
+def get_page_columns(page):
     words = page.extract_words(x_tolerance=1.5, y_tolerance=2, keep_blank_chars=False)
     if not words:
         return []
@@ -150,10 +148,10 @@ def get_page_columns(page) -> list[list[dict[str, Any]]]:
             return [ordered]
         return [ordered[:split_index], ordered[split_index:]]
 
-    return [column for column in split_half(left) + split_half(right) if len(column) >= 2]
+    return [col for col in split_half(left) + split_half(right) if len(col) >= 2]
 
 
-def column_lines(words) -> list[str]:
+def column_lines(words):
     if not words:
         return []
     ordered = sorted(words, key=lambda w: (round(float(w["top"]), 1), float(w["x0"])))
@@ -177,7 +175,7 @@ def column_lines(words) -> list[str]:
     ]
 
 
-def parse_english(path: Path) -> list[dict[str, Any]]:
+def parse_english(path: Path):
     results, current_level = [], ""
     with open_pdf(path) as pdf:
         for page_number, page in enumerate(pdf.pages, 1):
@@ -210,8 +208,9 @@ def parse_english(path: Path) -> list[dict[str, Any]]:
 def normalize_zh_pos(text: str) -> str:
     found = []
     for key in sorted(ZH_POS, key=len, reverse=True):
-        if key in clean(text) and ZH_POS[key] not in found:
-            found.append(ZH_POS[key])
+        value = ZH_POS[key]
+        if key in clean(text) and value not in found:
+            found.append(value)
     return ", ".join(found)
 
 
@@ -224,14 +223,14 @@ def parse_hsk_entry_line(line: str, level: str):
         return None
     rest = clean(match.group("rest"))
     pos, definition = "", rest
-    pos_pattern = re.compile(
+    pattern = re.compile(
         r"^(?P<pos>(?:能愿|名|动|形|副|代|介|连|助|量|数)"
         r"(?:\s*[、,]\s*(?:能愿|名|动|形|副|代|介|连|助|量|数))*"
         r"|(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|particle|classifier|number)"
         r"(?:\s*[,、]\s*(?:noun|verb|adjective|adverb|pronoun|preposition|conjunction|particle|classifier|number))*)\s*",
         re.I,
     )
-    pos_match = pos_pattern.match(rest)
+    pos_match = pattern.match(rest)
     if pos_match:
         pos = normalize_zh_pos(pos_match.group("pos")) or clean(pos_match.group("pos"))
         definition = clean(rest[pos_match.end():])
@@ -243,7 +242,7 @@ def parse_hsk_entry_line(line: str, level: str):
     }
 
 
-def detect_hsk_level(text: str) -> str | None:
+def detect_hsk_level(text: str):
     match = HSK_LEVEL_RE.search(normalize_unicode(text))
     if not match:
         return None
@@ -251,7 +250,7 @@ def detect_hsk_level(text: str) -> str | None:
     return f"HSK {level_text}"
 
 
-def parse_hsk(path: Path, diagnostic: bool = False) -> list[dict[str, Any]]:
+def parse_hsk(path: Path, diagnostic=False):
     results, current_level, pending = [], None, None
     if diagnostic:
         with open_pdf(path) as pdf:
@@ -273,12 +272,8 @@ def parse_hsk(path: Path, diagnostic: bool = False) -> list[dict[str, Any]]:
                 if current_level is None:
                     continue
                 upper = line.upper()
-                if (
-                    "NO. WORD PINYIN" in upper
-                    or upper == "ENTRIES"
-                    or "MANDARINBEAN.COM PAGE" in upper
-                    or line.startswith(("⇨", ">>>"))
-                ):
+                if ("NO. WORD PINYIN" in upper or upper == "ENTRIES" or
+                        "MANDARINBEAN.COM PAGE" in upper or line.startswith(("⇨", ">>>"))):
                     continue
                 parsed = parse_hsk_entry_line(line, current_level)
                 if parsed:
@@ -371,7 +366,7 @@ def get_radical_finder():
 
 
 @lru_cache(maxsize=None)
-def radicals(word: str) -> tuple[str, ...]:
+def radicals(word: str):
     try:
         finder = get_radical_finder()
         found = []
@@ -402,188 +397,275 @@ def prepare_embedding_rows(rows):
     return texts
 
 
-def make_graph(rows, threshold=0.78, batch_size=32, mutual_only=True):
-    from sentence_transformers import SentenceTransformer
-    from sklearn.neighbors import NearestNeighbors
+def pos_set(value: str) -> set[str]:
+    return {part.strip() for part in value.split(",") if part.strip()}
 
-    if not rows:
-        return {}, {}, []
 
-    texts = prepare_embedding_rows(rows)
-    log("Loading multilingual embedding model...")
-    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-    log(f"Encoding {len(texts):,} vocabulary entries...")
-    vectors = model.encode(
-        texts,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-        batch_size=batch_size,
-    )
+def compatible_pos(row_a, row_b) -> bool:
+    first, second = pos_set(row_a.get("pos", "")), pos_set(row_b.get("pos", ""))
+    return not first or not second or bool(first & second)
 
-    if len(rows) == 1:
-        return {
-            "concept_00001": {
-                "id": "concept_00001",
-                "definition": rows[0]["definition"],
-                "members": [rows[0]],
-            }
-        }, {}, []
 
-    k = min(30, len(rows))
-    nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=-1).fit(vectors)
-    distances, indexes = nn.kneighbors(vectors)
+def lexical_features(row_a, row_b) -> dict[str, Any]:
+    word_a = row_a["word"].lower()
+    word_b = row_b["word"].lower()
+    stem_match = False
+    if row_a["lang"] == row_b["lang"] == "en":
+        stem_a = re.sub(r"(ness|ment|tion|sion|ing|ed|er|ly|s)$", "", word_a)
+        stem_b = re.sub(r"(ness|ment|tion|sion|ing|ed|er|ly|s)$", "", word_b)
+        stem_match = len(stem_a) >= 4 and stem_a == stem_b
+    shared_radicals = sorted(set(row_a.get("radicals", [])) & set(row_b.get("radicals", [])))
+    return {"stem_match": stem_match, "shared_radicals": shared_radicals}
+
+
+def edge_confidence(similarity: float, row_a, row_b, features: dict[str, Any]) -> float:
+    score = 0.70 * similarity
+    if compatible_pos(row_a, row_b):
+        score += 0.15
+    if features["stem_match"]:
+        score += 0.10
+    if features["shared_radicals"] and row_a["lang"] == row_b["lang"] == "zh":
+        score += 0.05
+    return round(min(score, 1.0), 4)
+
+
+def build_nodes(rows):
+    return [
+        {key: row.get(key, "") for key in [
+            "id", "lang", "word", "pinyin", "pos", "definition", "level", "source", "radicals"
+        ]}
+        for row in rows
+    ]
+
+
+def build_typed_edges(rows, vectors, distances, indexes, semantic_threshold, translation_threshold):
     neighbour_sets = {i: set(map(int, indexes[i][1:])) for i in range(len(rows))}
-
-    parent = list(range(len(rows)))
-    rank = [0] * len(rows)
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        a, b = find(a), find(b)
-        if a == b:
-            return
-        if rank[a] < rank[b]:
-            a, b = b, a
-        parent[b] = a
-        if rank[a] == rank[b]:
-            rank[a] += 1
-
+    edges = []
+    translations = []
     review = []
-    log("Building constrained concept groups...")
+    seen = set()
+
     for i in range(len(rows)):
         for distance, j_value in zip(distances[i][1:], indexes[i][1:]):
             j = int(j_value)
-            score = 1.0 - float(distance)
-            mutual = i in neighbour_sets[j]
+            if i == j:
+                continue
+            key = tuple(sorted((i, j)))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            similarity = round(1.0 - float(distance), 4)
             cross_language = rows[i]["lang"] != rows[j]["lang"]
-            pos_i = rows[i].get("pos", "")
-            pos_j = rows[j].get("pos", "")
-            compatible_pos = not (pos_i and pos_j and pos_i != pos_j)
+            mutual = i in neighbour_sets[j]
+            features = lexical_features(rows[i], rows[j])
+            confidence = edge_confidence(similarity, rows[i], rows[j], features)
 
-            if score >= threshold and (not mutual_only or mutual) and compatible_pos:
-                union(i, j)
-            elif cross_language and score >= threshold - 0.06:
-                review.append({
-                    "entry_a": rows[i]["id"],
-                    "word_a": rows[i]["word"],
-                    "entry_b": rows[j]["id"],
-                    "word_b": rows[j]["word"],
-                    "similarity": round(score, 4),
-                    "mutual": mutual,
-                    "compatible_pos": compatible_pos,
+            if cross_language:
+                relationship = "translation_candidate"
+                record = {
+                    "english_id": rows[i]["id"] if rows[i]["lang"] == "en" else rows[j]["id"],
+                    "english_word": rows[i]["word"] if rows[i]["lang"] == "en" else rows[j]["word"],
+                    "chinese_id": rows[i]["id"] if rows[i]["lang"] == "zh" else rows[j]["id"],
+                    "chinese_word": rows[i]["word"] if rows[i]["lang"] == "zh" else rows[j]["word"],
+                    "similarity": similarity,
+                    "confidence": confidence,
+                    "mutual_neighbour": mutual,
+                    "compatible_pos": compatible_pos(rows[i], rows[j]),
+                }
+                if similarity >= translation_threshold:
+                    translations.append(record)
+                elif similarity >= translation_threshold - 0.08:
+                    review.append({**record, "relationship": relationship})
+            else:
+                relationship = "semantic_neighbour"
+                record = {
+                    "source": rows[i]["id"],
+                    "target": rows[j]["id"],
+                    "source_word": rows[i]["word"],
+                    "target_word": rows[j]["word"],
+                    "language": rows[i]["lang"],
+                    "relationship": relationship,
+                    "similarity": similarity,
+                    "confidence": confidence,
+                    "mutual_neighbour": mutual,
+                    "compatible_pos": compatible_pos(rows[i], rows[j]),
+                }
+                if similarity >= semantic_threshold and mutual and compatible_pos(rows[i], rows[j]):
+                    edges.append(record)
+                elif similarity >= semantic_threshold - 0.08:
+                    review.append(record)
+
+            if features["stem_match"] and rows[i]["lang"] == rows[j]["lang"] == "en":
+                edges.append({
+                    "source": rows[i]["id"], "target": rows[j]["id"],
+                    "source_word": rows[i]["word"], "target_word": rows[j]["word"],
+                    "language": "en", "relationship": "morphological",
+                    "similarity": similarity, "confidence": max(confidence, 0.9),
+                    "mutual_neighbour": mutual, "compatible_pos": True,
                 })
-        if (i + 1) % 1000 == 0 or i + 1 == len(rows):
-            log(f" Graph progress: {i + 1:,}/{len(rows):,}")
 
-    groups = defaultdict(list)
-    for i, row in enumerate(rows):
-        groups[find(i)].append(row)
+    return edges, translations, review
 
+
+def build_radical_edges(rows):
+    index = defaultdict(list)
+    for row in rows:
+        if row["lang"] == "zh":
+            for radical in row.get("radicals", []):
+                index[radical].append(row)
+    edges = []
+    seen = set()
+    for radical, members in index.items():
+        if len(members) > 100:
+            continue
+        for i, first in enumerate(members):
+            for second in members[i + 1:]:
+                key = (first["id"], second["id"], radical)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append({
+                    "source": first["id"], "target": second["id"],
+                    "source_word": first["word"], "target_word": second["word"],
+                    "language": "zh", "relationship": "radical_related",
+                    "shared_radicals": [radical], "confidence": 0.25,
+                })
+    return edges
+
+
+def build_lightweight_concepts(rows, edges):
+    adjacency = defaultdict(set)
+    for edge in edges:
+        if edge["relationship"] not in {"morphological"}:
+            continue
+        adjacency[edge["source"]].add(edge["target"])
+        adjacency[edge["target"]].add(edge["source"])
+
+    by_id = {row["id"]: row for row in rows}
     concepts = {}
-    radical_index = defaultdict(set)
-    for number, members in enumerate(groups.values(), 1):
-        concept_id = f"concept_{number:05}"
-        label = max(members, key=lambda item: len(item.get("definition", "")))
-        clean_members = []
-        for member in members:
-            clean_member = {
-                key: member.get(key, "")
-                for key in [
-                    "id", "lang", "word", "pinyin", "pos",
-                    "definition", "level", "radicals",
-                ]
-            }
-            clean_members.append(clean_member)
-            for radical in member.get("radicals", []):
-                radical_index[radical].add(concept_id)
-        concepts[concept_id] = {
-            "id": concept_id,
-            "definition": label["definition"],
-            "members": clean_members,
+    used = set()
+    number = 1
+    for node_id, neighbours in adjacency.items():
+        if node_id in used:
+            continue
+        members = [node_id] + sorted(neighbours)
+        members = list(dict.fromkeys(members))
+        if len(members) < 2:
+            continue
+        used.update(members)
+        concepts[f"concept_{number:05}"] = {
+            "id": f"concept_{number:05}",
+            "type": "morphological_group",
+            "members": [by_id[item] for item in members],
         }
-
-    return concepts, {key: sorted(value) for key, value in radical_index.items()}, review
+        number += 1
+    return concepts
 
 
 def resolve_pdf(requested: str, label: str) -> Path:
     path = Path(requested).expanduser()
     candidates = [path] if path.is_absolute() else [
-        Path.cwd() / path,
-        Path(__file__).resolve().parent / path,
-        Path.home() / "Downloads" / path.name,
-        Path.home() / "Desktop" / path.name,
+        Path.cwd() / path, Path(__file__).resolve().parent / path,
+        Path.home() / "Downloads" / path.name, Path.home() / "Desktop" / path.name,
         Path.home() / "Documents" / path.name,
     ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
     raise FileNotFoundError(
-        f"{label} PDF not found: {requested}\nChecked:\n"
-        + "\n".join(map(str, candidates))
+        f"{label} PDF not found: {requested}\nChecked:\n" + "\n".join(map(str, candidates))
     )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build a bilingual vocabulary semantic graph.")
+    parser = argparse.ArgumentParser(description="Build a bilingual typed vocabulary knowledge graph.")
     parser.add_argument("--english", default="ENGLISH.pdf")
     parser.add_argument("--hsk", default="HSK.pdf")
     parser.add_argument("--out", default="output")
-    parser.add_argument("--threshold", type=float, default=0.78)
+    parser.add_argument("--semantic-threshold", type=float, default=0.84)
+    parser.add_argument("--translation-threshold", type=float, default=0.88)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--strict-hsk", action="store_true")
     parser.add_argument("--diagnostic", action="store_true")
-    parser.add_argument("--allow-chaining", action="store_true")
     args = parser.parse_args()
 
+    start = time.perf_counter()
     log("=" * 70)
-    log("VOCABULARY NODE BUILDER — CONSTRAINED GRAPH")
+    log("VOCABULARY NODE BUILDER — TYPED RELATIONSHIP GRAPH")
     log("=" * 70)
+
     english_path = resolve_pdf(args.english, "English")
     hsk_path = resolve_pdf(args.hsk, "HSK")
     output = Path(args.out).resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    log("\n[1/5] Parsing Oxford 5000...")
+    log("\n[1/7] Parsing Oxford 5000...")
     english = parse_english(english_path)
     log(f"Extracted: {len(english):,}")
     validate_english(english)
 
-    log("\n[2/5] Parsing HSK 1–9...")
+    log("\n[2/7] Parsing HSK 1–9...")
     chinese = parse_hsk(hsk_path, diagnostic=args.diagnostic)
     log(f"Extracted: {len(chinese):,}")
     validate_hsk(chinese, strict=args.strict_hsk)
 
-    log("\n[3/5] Adding English WordNet definitions...")
-    rows = add_wordnet_definitions(english + chinese)
-    log(f"TOTAL VOCABULARY: {len(rows):,}")
+    rows = english + chinese
+    log(f"\n[3/7] Adding WordNet definitions to {len(rows):,} entries...")
+    rows = add_wordnet_definitions(rows)
 
-    log("\n[4/5] Building semantic graph...")
-    concepts, radical_index, review = make_graph(
-        rows,
-        threshold=args.threshold,
-        batch_size=args.batch_size,
-        mutual_only=not args.allow_chaining,
-    )
+    log("\n[4/7] Preparing nodes, radicals, and embeddings...")
+    texts = prepare_embedding_rows(rows)
+    from sentence_transformers import SentenceTransformer
+    from sklearn.neighbors import NearestNeighbors
 
-    log("\n[5/5] Writing output...")
-    pd.DataFrame(rows).drop(columns=["embedding_text"], errors="ignore").to_csv(
-        output / "entries.csv", index=False, encoding="utf-8-sig"
+    log("Loading multilingual embedding model...")
+    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    log(f"Encoding {len(texts):,} entries...")
+    vectors = model.encode(texts, normalize_embeddings=True, show_progress_bar=True, batch_size=args.batch_size)
+
+    log("\n[5/7] Finding candidate relationships...")
+    k = min(30, len(rows))
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=-1).fit(vectors)
+    distances, indexes = nn.kneighbors(vectors)
+    edges, translations, review = build_typed_edges(
+        rows, vectors, distances, indexes,
+        semantic_threshold=args.semantic_threshold,
+        translation_threshold=args.translation_threshold,
     )
-    (output / "concepts.json").write_text(
-        json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (output / "radicals.json").write_text(
-        json.dumps(radical_index, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    pd.DataFrame(review).drop_duplicates().to_csv(
-        output / "review.csv", index=False, encoding="utf-8-sig"
-    )
-    log(f"SUCCESS | concepts={len(concepts):,} | output={output}")
+    edges.extend(build_radical_edges(rows))
+    concepts = build_lightweight_concepts(rows, edges)
+
+    log("\n[6/7] Writing graph outputs...")
+    nodes = build_nodes(rows)
+    (output / "nodes.json").write_text(json.dumps(nodes, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "edges.json").write_text(json.dumps(edges, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "concepts.json").write_text(json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "radicals.json").write_text(json.dumps({row["id"]: row.get("radicals", []) for row in rows if row["lang"] == "zh"}, ensure_ascii=False, indent=2), encoding="utf-8")
+    pd.DataFrame(rows).drop(columns=["embedding_text"], errors="ignore").to_csv(output / "entries.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(translations).drop_duplicates().to_csv(output / "translations.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(review).drop_duplicates().to_csv(output / "review.csv", index=False, encoding="utf-8-sig")
+
+    diagnostics = {
+        "english_entries": len(english),
+        "hsk_entries": len(chinese),
+        "total_nodes": len(nodes),
+        "semantic_edges": sum(edge["relationship"] == "semantic_neighbour" for edge in edges),
+        "morphological_edges": sum(edge["relationship"] == "morphological" for edge in edges),
+        "radical_edges": sum(edge["relationship"] == "radical_related" for edge in edges),
+        "translation_edges": len(translations),
+        "review_candidates": len(review),
+        "concepts": len(concepts),
+        "semantic_threshold": args.semantic_threshold,
+        "translation_threshold": args.translation_threshold,
+        "model": "paraphrase-multilingual-MiniLM-L12-v2",
+        "elapsed_seconds": round(time.perf_counter() - start, 2),
+    }
+    (output / "diagnostics.json").write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    log("\n[7/7] SUCCESS")
+    log(json.dumps(diagnostics, indent=2))
+    log(f"Output: {output}")
 
 
 if __name__ == "__main__":
