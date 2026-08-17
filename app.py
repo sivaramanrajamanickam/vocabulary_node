@@ -48,6 +48,111 @@ OXFORD_POS = {
 
 DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 
+NUMBER_WORDS = {
+    "zero": {"零", "〇"},
+    "one": {"一"},
+    "two": {"二", "两"},
+    "three": {"三"},
+    "four": {"四"},
+    "five": {"五"},
+    "six": {"六"},
+    "seven": {"七"},
+    "eight": {"八"},
+    "nine": {"九"},
+    "ten": {"十"},
+    "hundred": {"百"},
+    "thousand": {"千"},
+}
+
+FUNCTION_WORDS = {
+    "a", "an", "and", "as", "because", "but", "if", "nor", "or",
+    "than", "that", "the", "though", "unless", "until", "when",
+    "where", "whether", "while", "how", "why", "also", "again",
+}
+
+
+def has_definition(row):
+    return bool(clean(row.get("definition", "")))
+
+
+def numeric_mismatch(english_word, chinese_word):
+    expected = NUMBER_WORDS.get(english_word.lower())
+    return expected is not None and chinese_word not in expected
+
+
+def translation_quality(confidence, similarity):
+    if confidence >= 0.88 and similarity >= 0.80:
+        return "strong"
+    if confidence >= 0.80 and similarity >= 0.74:
+        return "probable"
+    if confidence >= 0.70:
+        return "review"
+    return "reject"
+
+
+def translation_decision(
+    similarity,
+    confidence,
+    english_row,
+    chinese_row,
+    relation,
+):
+    english_word = english_row["word"].lower()
+    chinese_word = chinese_row["word"]
+    chinese_has_definition = has_definition(chinese_row)
+    english_has_definition = has_definition(english_row)
+
+    if numeric_mismatch(english_word, chinese_word):
+        return "review"
+
+    if relation == "conflict":
+        return "review"
+
+    # Function words produce many false high-similarity matches.
+    # Require a definition or very high similarity for automatic acceptance.
+    if english_word in FUNCTION_WORDS and not chinese_has_definition:
+        return "review"
+
+    if not chinese_has_definition and similarity < 0.90:
+        return "review"
+
+    if (
+        confidence >= 0.84
+        and similarity >= 0.78
+        and english_has_definition
+        and chinese_has_definition
+    ):
+        return "strong"
+
+    if confidence >= 0.80 and similarity >= 0.74 and chinese_has_definition:
+        return "probable"
+
+    if confidence >= 0.70:
+        return "review"
+
+    return "reject"
+
+
+def limit_translation_candidates(records, max_per_english=10):
+    records = sorted(
+        records,
+        key=lambda row: (
+            row.get("confidence", 0),
+            row.get("similarity", 0),
+        ),
+        reverse=True,
+    )
+    counts = defaultdict(int)
+    result = []
+
+    for record in records:
+        english_id = record["english_id"]
+        if counts[english_id] >= max_per_english:
+            continue
+        counts[english_id] += 1
+        result.append(record)
+
+    return result
 
 def log(message: str) -> None:
     print(message, flush=True)
@@ -539,18 +644,30 @@ def lexical_features(row_a, row_b):
     return {"stem_match": stem_match, "shared_radicals": shared_radicals}
 
 
-def translation_confidence(similarity, english_row, chinese_row, mutual, relation):
+def translation_confidence(
+    similarity,
+    english_row,
+    chinese_row,
+    mutual,
+    relation,
+):
     score = 0.80 * similarity
+
     if mutual:
         score += 0.06
+
     if relation == "match":
         score += 0.09
     elif relation == "conflict":
         score -= 0.20
-    if english_row.get("definition") and chinese_row.get("definition"):
-        score += 0.05
-    return round(max(0.0, min(score, 1.0)), 4)
 
+    if (
+        english_row.get("definition")
+        and chinese_row.get("definition")
+    ):
+        score += 0.05
+
+    return round(max(0.0, min(score, 1.0)), 4)
 
 def semantic_confidence(similarity, mutual, relation, features):
     score = 0.70 * similarity
@@ -625,34 +742,90 @@ def build_same_language_edges(rows, vectors, indices_by_lang, threshold, k):
     return semantic_edges, morphology_edges
 
 
-def build_translation_edges(rows, vectors, english_indices, chinese_indices, threshold, k):
+def build_translation_edges(
+    rows,
+    vectors,
+    english_indices,
+    chinese_indices,
+    threshold,
+    k,
+):
     english_rows = [rows[i] for i in english_indices]
     chinese_rows = [rows[i] for i in chinese_indices]
+
     english_vectors = vectors[english_indices]
     chinese_vectors = vectors[chinese_indices]
-    pairs = list(iter_top_neighbours(
-        english_vectors, chinese_vectors, english_rows, chinese_rows, k
-    ))
+
+    pairs = list(
+        iter_top_neighbours(
+            english_vectors,
+            chinese_vectors,
+            english_rows,
+            chinese_rows,
+            k,
+        )
+    )
+
     edges = []
     review = []
+
     for english, chinese, distance in pairs:
         similarity = round(1.0 - distance, 4)
         relation = pos_relation(english, chinese)
+
         confidence = translation_confidence(
-            similarity, english, chinese, False, relation
+            similarity,
+            english,
+            chinese,
+            False,
+            relation,
         )
+
         record = {
-            "english_id": english["id"], "english_word": english["word"],
-            "chinese_id": chinese["id"], "chinese_word": chinese["word"],
+            "english_id": english["id"],
+            "english_word": english["word"],
+            "chinese_id": chinese["id"],
+            "chinese_word": chinese["word"],
             "english_definition": english.get("definition", ""),
             "chinese_definition": chinese.get("definition", ""),
-            "similarity": similarity, "confidence": confidence,
-            "mutual_neighbour": False, "pos_relation": relation,
+            "similarity": similarity,
+            "confidence": confidence,
+            "mutual_neighbour": False,
+            "pos_relation": relation,
         }
-        if confidence >= threshold and relation != "conflict":
-            edges.append({**record, "relationship": "translation", "quality": "strong" if confidence >= 0.90 else "probable"})
-        elif confidence >= threshold - 0.08:
-            review.append({**record, "relationship": "translation_candidate"})
+
+        decision = translation_decision(
+            similarity,
+            confidence,
+            english,
+            chinese,
+            relation,
+        )
+
+        if decision in {"strong", "probable"}:
+            edges.append({
+                **record,
+                "relationship": "translation",
+                "quality": decision,
+            })
+
+        elif decision == "review":
+            review.append({
+                **record,
+                "relationship": "translation_candidate",
+                "quality": "review",
+            })
+
+    edges = limit_translation_candidates(
+        edges,
+        max_per_english=10,
+    )
+
+    review = limit_translation_candidates(
+        review,
+        max_per_english=20,
+    )
+
     return edges, review
 
 
