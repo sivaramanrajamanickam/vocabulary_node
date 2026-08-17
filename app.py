@@ -49,19 +49,10 @@ OXFORD_POS = {
 DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 
 NUMBER_WORDS = {
-    "zero": {"零", "〇"},
-    "one": {"一"},
-    "two": {"二", "两"},
-    "three": {"三"},
-    "four": {"四"},
-    "five": {"五"},
-    "six": {"六"},
-    "seven": {"七"},
-    "eight": {"八"},
-    "nine": {"九"},
-    "ten": {"十"},
-    "hundred": {"百"},
-    "thousand": {"千"},
+    "zero": {"零", "〇"}, "one": {"一"}, "two": {"二", "两"},
+    "three": {"三"}, "four": {"四"}, "five": {"五"}, "six": {"六"},
+    "seven": {"七"}, "eight": {"八"}, "nine": {"九"}, "ten": {"十"},
+    "hundred": {"百"}, "thousand": {"千"},
 }
 
 FUNCTION_WORDS = {
@@ -70,89 +61,6 @@ FUNCTION_WORDS = {
     "where", "whether", "while", "how", "why", "also", "again",
 }
 
-
-def has_definition(row):
-    return bool(clean(row.get("definition", "")))
-
-
-def numeric_mismatch(english_word, chinese_word):
-    expected = NUMBER_WORDS.get(english_word.lower())
-    return expected is not None and chinese_word not in expected
-
-
-def translation_quality(confidence, similarity):
-    if confidence >= 0.88 and similarity >= 0.80:
-        return "strong"
-    if confidence >= 0.80 and similarity >= 0.74:
-        return "probable"
-    if confidence >= 0.70:
-        return "review"
-    return "reject"
-
-
-def translation_decision(
-    similarity,
-    confidence,
-    english_row,
-    chinese_row,
-    relation,
-):
-    english_word = english_row["word"].lower()
-    chinese_word = chinese_row["word"]
-    chinese_has_definition = has_definition(chinese_row)
-    english_has_definition = has_definition(english_row)
-
-    if numeric_mismatch(english_word, chinese_word):
-        return "review"
-
-    if relation == "conflict":
-        return "review"
-
-    # Function words produce many false high-similarity matches.
-    # Require a definition or very high similarity for automatic acceptance.
-    if english_word in FUNCTION_WORDS and not chinese_has_definition:
-        return "review"
-
-    if not chinese_has_definition and similarity < 0.90:
-        return "review"
-
-    if (
-        confidence >= 0.84
-        and similarity >= 0.78
-        and english_has_definition
-        and chinese_has_definition
-    ):
-        return "strong"
-
-    if confidence >= 0.80 and similarity >= 0.74 and chinese_has_definition:
-        return "probable"
-
-    if confidence >= 0.70:
-        return "review"
-
-    return "reject"
-
-
-def limit_translation_candidates(records, max_per_english=10):
-    records = sorted(
-        records,
-        key=lambda row: (
-            row.get("confidence", 0),
-            row.get("similarity", 0),
-        ),
-        reverse=True,
-    )
-    counts = defaultdict(int)
-    result = []
-
-    for record in records:
-        english_id = record["english_id"]
-        if counts[english_id] >= max_per_english:
-            continue
-        counts[english_id] += 1
-        result.append(record)
-
-    return result
 
 def log(message: str) -> None:
     print(message, flush=True)
@@ -188,16 +96,12 @@ def remove_tones(text: str) -> str:
     ).lower()
 
 
-def suppress_pdf_font_warnings() -> None:
+def open_pdf(path: Path):
     warnings.filterwarnings(
         "ignore",
         message=r"Could not get FontBBox from font descriptor.*",
     )
     logging.getLogger("pdfminer").setLevel(logging.ERROR)
-
-
-def open_pdf(path: Path):
-    suppress_pdf_font_warnings()
     return pdfplumber.open(path)
 
 
@@ -219,7 +123,7 @@ def looks_like_oxford_word(text: str) -> bool:
     ))
 
 
-def parse_oxford_cell(text: str, level: str) -> dict[str, Any] | None:
+def parse_oxford_cell(text: str, level: str):
     text = re.sub(r"^[•·]+", "", clean(text))
     if not text:
         return None
@@ -506,7 +410,6 @@ def validate_english(rows):
     for level in ("A1", "A2", "B1", "B2", "C1"):
         log(f" {level}: {counts[level]:,}")
     log(f" TOTAL: {len(rows):,}")
-
     if len(rows) < 4000:
         raise RuntimeError(f"Oxford extraction too low: {len(rows):,}")
 
@@ -520,7 +423,6 @@ def validate_hsk(rows, strict=False):
     for level, expected in HSK_EXPECTED.items():
         log(f" {level:<8} {counts[level]:>6,} / expected {expected:,}")
     log(f" TOTAL: {len(rows):,} / expected 11,000")
-
     if len(rows) < 10000:
         raise RuntimeError(f"HSK extraction too low: {len(rows):,}/11,000")
     if strict and len(rows) != 11000:
@@ -600,7 +502,7 @@ def radicals(word: str):
                     found.append(char)
         return tuple(sorted(set(found)))
     except Exception:
-        return tuple(sorted(set(char for char in word if has_hanzi(char))))
+        return tuple(sorted(set(char for char in word if has_hanzi(char)))
 
 
 def prepare_embeddings(rows):
@@ -644,30 +546,18 @@ def lexical_features(row_a, row_b):
     return {"stem_match": stem_match, "shared_radicals": shared_radicals}
 
 
-def translation_confidence(
-    similarity,
-    english_row,
-    chinese_row,
-    mutual,
-    relation,
-):
+def translation_confidence(similarity, english_row, chinese_row, mutual, relation):
     score = 0.80 * similarity
-
     if mutual:
         score += 0.06
-
     if relation == "match":
         score += 0.09
     elif relation == "conflict":
         score -= 0.20
-
-    if (
-        english_row.get("definition")
-        and chinese_row.get("definition")
-    ):
+    if english_row.get("definition") and chinese_row.get("definition"):
         score += 0.05
-
     return round(max(0.0, min(score, 1.0)), 4)
+
 
 def semantic_confidence(similarity, mutual, relation, features):
     score = 0.70 * similarity
@@ -742,91 +632,99 @@ def build_same_language_edges(rows, vectors, indices_by_lang, threshold, k):
     return semantic_edges, morphology_edges
 
 
-def build_translation_edges(
-    rows,
-    vectors,
-    english_indices,
-    chinese_indices,
-    threshold,
-    k,
-):
+def has_definition(row):
+    return bool(clean(row.get("definition", "")))
+
+
+def numeric_mismatch(english_word, chinese_word):
+    expected = NUMBER_WORDS.get(english_word.lower())
+    return expected is not None and chinese_word not in expected
+
+
+def translation_quality(confidence, similarity):
+    if confidence >= 0.88 and similarity >= 0.80:
+        return "strong"
+    if confidence >= 0.80 and similarity >= 0.74:
+        return "probable"
+    if confidence >= 0.70:
+        return "review"
+    return "reject"
+
+
+def translation_decision(similarity, confidence, english_row, chinese_row, relation):
+    english_word = english_row["word"].lower()
+    chinese_word = chinese_row["word"]
+    chinese_has_definition = has_definition(chinese_row)
+    english_has_definition = has_definition(english_row)
+
+    if numeric_mismatch(english_word, chinese_word):
+        return "review"
+    if relation == "conflict":
+        return "review"
+    if english_word in FUNCTION_WORDS and not chinese_has_definition:
+        return "review"
+    if not chinese_has_definition and similarity < 0.90:
+        return "review"
+    if confidence >= 0.84 and similarity >= 0.78 and english_has_definition and chinese_has_definition:
+        return "strong"
+    if confidence >= 0.80 and similarity >= 0.74 and chinese_has_definition:
+        return "probable"
+    if confidence >= 0.70:
+        return "review"
+    return "reject"
+
+
+def limit_translation_candidates(records, max_per_english=10):
+    ranked = sorted(
+        records,
+        key=lambda row: (
+            str(row.get("english_id", "")),
+            -float(row.get("confidence", 0.0)),
+            -float(row.get("similarity", 0.0)),
+        ),
+    )
+    counts = defaultdict(int)
+    result = []
+    for record in ranked:
+        english_id = str(record.get("english_id", ""))
+        if not english_id or counts[english_id] >= max_per_english:
+            continue
+        counts[english_id] += 1
+        result.append(record)
+    return result
+
+
+def build_translation_edges(rows, vectors, english_indices, chinese_indices, threshold, k):
     english_rows = [rows[i] for i in english_indices]
     chinese_rows = [rows[i] for i in chinese_indices]
-
     english_vectors = vectors[english_indices]
     chinese_vectors = vectors[chinese_indices]
-
-    pairs = list(
-        iter_top_neighbours(
-            english_vectors,
-            chinese_vectors,
-            english_rows,
-            chinese_rows,
-            k,
-        )
-    )
-
+    pairs = list(iter_top_neighbours(english_vectors, chinese_vectors, english_rows, chinese_rows, k))
     edges = []
     review = []
 
     for english, chinese, distance in pairs:
         similarity = round(1.0 - distance, 4)
         relation = pos_relation(english, chinese)
-
-        confidence = translation_confidence(
-            similarity,
-            english,
-            chinese,
-            False,
-            relation,
-        )
-
+        confidence = translation_confidence(similarity, english, chinese, False, relation)
         record = {
-            "english_id": english["id"],
-            "english_word": english["word"],
-            "chinese_id": chinese["id"],
-            "chinese_word": chinese["word"],
+            "english_id": english["id"], "english_word": english["word"],
+            "chinese_id": chinese["id"], "chinese_word": chinese["word"],
             "english_definition": english.get("definition", ""),
             "chinese_definition": chinese.get("definition", ""),
-            "similarity": similarity,
-            "confidence": confidence,
-            "mutual_neighbour": False,
-            "pos_relation": relation,
+            "similarity": similarity, "confidence": confidence,
+            "mutual_neighbour": False, "pos_relation": relation,
         }
-
-        decision = translation_decision(
-            similarity,
-            confidence,
-            english,
-            chinese,
-            relation,
-        )
-
+        decision = translation_decision(similarity, confidence, english, chinese, relation)
         if decision in {"strong", "probable"}:
-            edges.append({
-                **record,
-                "relationship": "translation",
-                "quality": decision,
-            })
-
+            edges.append({**record, "relationship": "translation", "quality": decision})
         elif decision == "review":
-            review.append({
-                **record,
-                "relationship": "translation_candidate",
-                "quality": "review",
-            })
+            review.append({**record, "relationship": "translation_candidate", "quality": "review"})
 
-    edges = limit_translation_candidates(
-        edges,
-        max_per_english=10,
+    return (
+        limit_translation_candidates(edges, max_per_english=10),
+        limit_translation_candidates(review, max_per_english=5),
     )
-
-    review = limit_translation_candidates(
-        review,
-        max_per_english=20,
-    )
-
-    return edges, review
 
 
 def build_radical_edges(rows, max_group_size=100):
@@ -873,6 +771,76 @@ def build_character_groups(rows):
     return dict(groups)
 
 
+def build_character_nodes(rows):
+    characters = {}
+    for row in rows:
+        if row["lang"] != "zh":
+            continue
+        word = row["word"]
+        pinyin_parts = clean(row.get("pinyin", "")).split()
+        definition = clean_definition(row.get("definition", ""))
+        for position, character in enumerate(word):
+            if not has_hanzi(character):
+                continue
+            node = characters.setdefault(character, {
+                "id": f"char_{character}",
+                "character": character,
+                "readings": defaultdict(lambda: {
+                    "meanings": set(), "evidence_words": set(), "levels": set()
+                }),
+                "source_words": set(),
+                "radicals": set(row.get("radicals", [])),
+            })
+            node["source_words"].add(word)
+            node["radicals"].update(row.get("radicals", []))
+            pinyin = pinyin_parts[position] if position < len(pinyin_parts) else ""
+            reading = node["readings"][pinyin or "unknown"]
+            if definition:
+                reading["meanings"].add(definition)
+            reading["evidence_words"].add(word)
+            if row.get("level"):
+                reading["levels"].add(row["level"])
+
+    output = {}
+    for character, node in sorted(characters.items()):
+        output[character] = {
+            "id": node["id"],
+            "character": character,
+            "readings": [
+                {
+                    "pinyin": pinyin if pinyin != "unknown" else "",
+                    "meanings": sorted(reading["meanings"]),
+                    "meaning_evidence": "word_derived",
+                    "evidence_words": sorted(reading["evidence_words"]),
+                    "levels": sorted(reading["levels"]),
+                }
+                for pinyin, reading in sorted(node["readings"].items())
+            ],
+            "source_words": sorted(node["source_words"]),
+            "radicals": sorted(node["radicals"]),
+        }
+    return output
+
+
+def build_character_edges(rows, character_nodes):
+    edges = []
+    for row in rows:
+        if row["lang"] != "zh":
+            continue
+        pinyin_parts = clean(row.get("pinyin", "")).split()
+        for position, character in enumerate(row["word"]):
+            if character not in character_nodes:
+                continue
+            edges.append({
+                "source": row["id"], "source_word": row["word"],
+                "target": character_nodes[character]["id"],
+                "character": character, "position": position,
+                "pinyin": pinyin_parts[position] if position < len(pinyin_parts) else "",
+                "relationship": "contains_character",
+            })
+    return edges
+
+
 def build_meaning_groups(rows, semantic_edges, language, prefix, threshold):
     by_id = {row["id"]: row for row in rows if row["lang"] == language}
     adjacency = defaultdict(set)
@@ -904,16 +872,14 @@ def build_meaning_groups(rows, semantic_edges, language, prefix, threshold):
             continue
         group_id = f"{prefix}_{number:05}"
         groups[group_id] = {
-            "id": group_id,
-            "language": language,
-            "type": "meaning_group",
+            "id": group_id, "language": language, "type": "meaning_group",
             "members": [by_id[item] for item in sorted(component)],
         }
         number += 1
     return groups
 
 
-def build_domains(rows):
+def build_english_domains(rows):
     domain_words = {
         "education": ["school", "teacher", "student", "learn", "study"],
         "emotion": ["happy", "sad", "angry", "fear", "love", "hate"],
@@ -922,9 +888,9 @@ def build_domains(rows):
         "money": ["money", "pay", "cost", "price", "buy", "sell"],
         "travel": ["travel", "visit", "arrive", "leave", "journey"],
     }
-    english_ids = {row["word"].lower(): row["id"] for row in rows if row["lang"] == "en"}
+    ids = {row["word"].lower(): row["id"] for row in rows if row["lang"] == "en"}
     return {
-        domain: [english_ids[word] for word in words if word in english_ids]
+        domain: [ids[word] for word in words if word in ids]
         for domain, words in domain_words.items()
     }
 
@@ -945,14 +911,14 @@ def resolve_pdf(requested: str, label: str) -> Path:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build separate English and Mandarin vocabulary layers.")
+    parser = argparse.ArgumentParser(description="Build complete English and Mandarin vocabulary layers.")
     parser.add_argument("--english", default="ENGLISH.pdf")
     parser.add_argument("--hsk", default="HSK.pdf")
     parser.add_argument("--out", default="output")
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--semantic-threshold", type=float, default=0.84)
+    parser.add_argument("--semantic-threshold", type=float, default=0.80)
     parser.add_argument("--meaning-group-threshold", type=float, default=0.90)
-    parser.add_argument("--translation-threshold", type=float, default=0.82)
+    parser.add_argument("--translation-threshold", type=float, default=0.80)
     parser.add_argument("--same-language-k", type=int, default=30)
     parser.add_argument("--translation-k", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -962,7 +928,7 @@ def main():
 
     start = time.perf_counter()
     log("=" * 70)
-    log("VOCABULARY BUILDER — LANGUAGE-SEPARATED GRAPH")
+    log("VOCABULARY BUILDER — COMPLETE BILINGUAL LAYERED GRAPH")
     log("=" * 70)
 
     english_path = resolve_pdf(args.english, "English")
@@ -970,21 +936,21 @@ def main():
     output = Path(args.out).resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    log("\n[1/8] Parsing Oxford 5000...")
+    log("\n[1/9] Parsing Oxford 5000...")
     english = parse_english(english_path)
     log(f"Extracted: {len(english):,}")
     validate_english(english)
 
-    log("\n[2/8] Parsing HSK 1–9...")
+    log("\n[2/9] Parsing HSK 1–9...")
     chinese = parse_hsk(hsk_path, diagnostic=args.diagnostic)
     log(f"Extracted: {len(chinese):,}")
     validate_hsk(chinese, strict=args.strict_hsk)
 
     rows = english + chinese
-    log("\n[3/8] Adding multi-sense WordNet definitions...")
+    log("\n[3/9] Adding multi-sense WordNet definitions...")
     rows = add_wordnet_definitions(rows)
 
-    log("\n[4/8] Preparing language-specific embeddings...")
+    log("\n[4/9] Preparing embeddings and radicals...")
     texts = prepare_embeddings(rows)
 
     from sentence_transformers import SentenceTransformer
@@ -993,66 +959,75 @@ def main():
     log(f"Encoding {len(texts):,} nodes...")
     vectors = model.encode(texts, normalize_embeddings=True, show_progress_bar=True, batch_size=args.batch_size)
 
-    english_indices = [index for index, row in enumerate(rows) if row["lang"] == "en"]
-    chinese_indices = [index for index, row in enumerate(rows) if row["lang"] == "zh"]
-    indices_by_lang = {"en": english_indices, "zh": chinese_indices}
+    english_indices = [i for i, row in enumerate(rows) if row["lang"] == "en"]
+    chinese_indices = [i for i, row in enumerate(rows) if row["lang"] == "zh"]
 
-    log("\n[5/8] Building same-language semantic and morphology edges...")
+    log("\n[5/9] Building English and Mandarin semantic layers...")
     semantic_edges, morphology_edges = build_same_language_edges(
-        rows, vectors, indices_by_lang, args.semantic_threshold, args.same_language_k
+        rows, vectors, {"en": english_indices, "zh": chinese_indices},
+        args.semantic_threshold, args.same_language_k,
     )
 
-    log("[6/8] Building separate English–Chinese translation candidates...")
+    log("[6/9] Building translation candidates...")
     translation_edges, translation_review = build_translation_edges(
         rows, vectors, english_indices, chinese_indices,
-        args.translation_threshold, args.translation_k
+        args.translation_threshold, args.translation_k,
     )
 
+    log("[7/9] Building Mandarin character and structural layers...")
     radical_edges = build_radical_edges(rows)
     pinyin_groups = build_pinyin_groups(rows)
     character_groups = build_character_groups(rows)
+    character_nodes = build_character_nodes(rows)
+    character_edges = build_character_edges(rows, character_nodes)
 
-    log("[7/8] Building language-specific meaning groups...")
+    log("[8/9] Building meaning groups and English domains...")
     english_meaning_groups = build_meaning_groups(
-        rows, semantic_edges, "en", "english_meaning", args.meaning_group_threshold
+        rows, semantic_edges, "en", "english_meaning", args.meaning_group_threshold,
     )
-    chinese_meaning_groups = build_meaning_groups(
-        rows, semantic_edges, "zh", "chinese_meaning", args.meaning_group_threshold
+    mandarin_meaning_groups = build_meaning_groups(
+        rows, semantic_edges, "zh", "mandarin_meaning", args.meaning_group_threshold,
     )
-    domains = build_domains(rows)
+    english_domains = build_english_domains(rows)
 
     nodes = build_nodes(rows)
     (output / "nodes.json").write_text(json.dumps(nodes, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "english_nodes.json").write_text(json.dumps([n for n in nodes if n["lang"] == "en"], ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "mandarin_word_nodes.json").write_text(json.dumps([n for n in nodes if n["lang"] == "zh"], ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "mandarin_character_nodes.json").write_text(json.dumps(character_nodes, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "mandarin_character_edges.json").write_text(json.dumps(character_edges, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "edges_semantic_english.json").write_text(json.dumps([e for e in semantic_edges if e["language"] == "en"], ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "edges_semantic_chinese.json").write_text(json.dumps([e for e in semantic_edges if e["language"] == "zh"], ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "edges_semantic_mandarin.json").write_text(json.dumps([e for e in semantic_edges if e["language"] == "zh"], ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "edges_morphological_english.json").write_text(json.dumps(morphology_edges, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "edges_translation.json").write_text(json.dumps(translation_edges, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "edges_radical.json").write_text(json.dumps(radical_edges, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "english_meaning_groups.json").write_text(json.dumps(english_meaning_groups, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "chinese_meaning_groups.json").write_text(json.dumps(chinese_meaning_groups, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "pinyin_groups.json").write_text(json.dumps(pinyin_groups, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "character_groups.json").write_text(json.dumps(character_groups, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "domains.json").write_text(json.dumps(domains, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "mandarin_meaning_groups.json").write_text(json.dumps(mandarin_meaning_groups, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "mandarin_pinyin_groups.json").write_text(json.dumps(pinyin_groups, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "mandarin_character_groups.json").write_text(json.dumps(character_groups, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "english_domains.json").write_text(json.dumps(english_domains, ensure_ascii=False, indent=2), encoding="utf-8")
     pd.DataFrame(nodes).to_csv(output / "entries.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(translation_edges).to_csv(output / "translations.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(translation_review).to_csv(output / "translation_review.csv", index=False, encoding="utf-8-sig")
 
     diagnostics = {
         "english_nodes": len(english),
-        "chinese_nodes": len(chinese),
-        "total_nodes": len(nodes),
+        "mandarin_word_nodes": len(chinese),
+        "total_word_nodes": len(nodes),
+        "mandarin_character_nodes": len(character_nodes),
+        "mandarin_character_edges": len(character_edges),
         "english_semantic_edges": sum(e["language"] == "en" for e in semantic_edges),
-        "chinese_semantic_edges": sum(e["language"] == "zh" for e in semantic_edges),
+        "mandarin_semantic_edges": sum(e["language"] == "zh" for e in semantic_edges),
         "english_morphological_edges": len(morphology_edges),
         "translation_edges": len(translation_edges),
         "translation_review_candidates": len(translation_review),
         "radical_edges": len(radical_edges),
         "english_meaning_groups": len(english_meaning_groups),
-        "chinese_meaning_groups": len(chinese_meaning_groups),
+        "mandarin_meaning_groups": len(mandarin_meaning_groups),
         "exact_pinyin_groups": len(pinyin_groups["exact"]),
         "toneless_pinyin_groups": len(pinyin_groups["toneless"]),
         "character_groups": len(character_groups),
-        "domains": len(domains),
+        "english_domains": len(english_domains),
         "model": args.model,
         "semantic_threshold": args.semantic_threshold,
         "meaning_group_threshold": args.meaning_group_threshold,
@@ -1063,7 +1038,7 @@ def main():
     }
     (output / "diagnostics.json").write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    log("\n[8/8] SUCCESS")
+    log("\n[9/9] SUCCESS")
     log(json.dumps(diagnostics, ensure_ascii=False, indent=2))
     log(f"Output: {output}")
 
