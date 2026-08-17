@@ -56,8 +56,6 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           TOKENIZERS_PARALLELISM: "false"
-          OMP_NUM_THREADS: "4"
-          MKL_NUM_THREADS: "4"
         run: |
           rm -rf output
           python -u app.py \
